@@ -61,6 +61,8 @@ Config parse_args(int argc, char** argv) {
         } else if (arg.starts_with("--chaos-device-spike=")) {
             config.chaos_device_spike_count =
                 edgeflow::parse_positive_size(edgeflow::arg_value(arg), "--chaos-device-spike");
+        } else if (arg.starts_with("--threads=")) {
+            config.thread_count = edgeflow::parse_positive_size(edgeflow::arg_value(arg), "--threads");
         } else {
             throw std::invalid_argument("unknown argument: " + std::string(arg));
         }
@@ -71,6 +73,12 @@ Config parse_args(int argc, char** argv) {
     }
     if (config.device_count > 100000) {
         throw std::invalid_argument("--devices exceeds maximum of 100000");
+    }
+    if (config.thread_count == 0) {
+        throw std::invalid_argument("--threads must be at least 1");
+    }
+    if (config.thread_count > 256) {
+        throw std::invalid_argument("--threads exceeds maximum of 256");
     }
     if (config.chaos_device_spike_count > 0 &&
         config.chaos_device_spike_at_sec >= config.duration_seconds) {

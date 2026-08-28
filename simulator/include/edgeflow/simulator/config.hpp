@@ -12,6 +12,10 @@ struct Config {
     double events_per_second_per_device = 1.0;
     std::size_t duration_seconds = 30;
 
+    // Number of io_context threads the fleet is sharded across. 1 keeps the
+    // original single-threaded behaviour exactly.
+    std::size_t thread_count = 1;
+
     // Chaos scenarios, all off (zero/0.0) by default.
     std::chrono::milliseconds chaos_latency{0};
     double chaos_packet_loss_percent = 0.0;

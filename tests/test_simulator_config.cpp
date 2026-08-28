@@ -205,3 +205,32 @@ TEST(SimulatorConfig, RejectsDeviceSpikeAtOrAfterDuration) {
     char* argv[] = {prog, duration, spike, spike_at};
     EXPECT_THROW(parse_args(4, argv), std::invalid_argument);
 }
+
+TEST(SimulatorConfig, DefaultsToOneThread) {
+    char prog[] = "edgeflow-simulator";
+    char* argv[] = {prog};
+    auto config = parse_args(1, argv);
+    EXPECT_EQ(config.thread_count, 1u);
+}
+
+TEST(SimulatorConfig, ParsesThreadCount) {
+    char prog[] = "edgeflow-simulator";
+    char threads[] = "--threads=4";
+    char* argv[] = {prog, threads};
+    auto config = parse_args(2, argv);
+    EXPECT_EQ(config.thread_count, 4u);
+}
+
+TEST(SimulatorConfig, RejectsZeroThreads) {
+    char prog[] = "edgeflow-simulator";
+    char threads[] = "--threads=0";
+    char* argv[] = {prog, threads};
+    EXPECT_THROW(parse_args(2, argv), std::invalid_argument);
+}
+
+TEST(SimulatorConfig, RejectsAbsurdThreadCount) {
+    char prog[] = "edgeflow-simulator";
+    char threads[] = "--threads=5000";
+    char* argv[] = {prog, threads};
+    EXPECT_THROW(parse_args(2, argv), std::invalid_argument);
+}
