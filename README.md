@@ -3,9 +3,11 @@
 A concurrent C++20 telemetry pipeline: simulated devices → TCP gateway →
 bounded queue → worker pool → batcher → sink.
 
-Phase 1 (this codebase): the C++ core pipeline only, with a file-backed
-sink. No cloud backend, database, or dashboard yet — see
-`docs/superpowers/specs/2026-08-28-phase1-cpp-core-design.md` for scope.
+Phases 1-3 have landed: the C++ core pipeline with a file-backed sink
+(Phase 1), a benchmark suite and simulator chaos scenarios (Phase 2), and a
+lock-free queue variant benchmarked against the mutex one (Phase 3). No cloud
+backend, database, or dashboard yet. Each phase has its own spec under
+`docs/superpowers/specs/`.
 
 ## Build
 
@@ -68,28 +70,46 @@ means "at or below 100us", not "exactly 100us".
 ## Benchmarks
 
 Real, measured numbers from `scripts/run_benchmarks.py` and
-`./build/benchmarks/edgeflow-benchmarks` -- see `docs/benchmarks.md` for the
-full results table. Highlights from the most recent run (Apple M-series,
-10 cores, `-DCMAKE_BUILD_TYPE=Release`, gateway and simulator sharing the
-one machine):
+`./build-release/benchmarks/edgeflow-benchmarks` -- see `docs/benchmarks.md`
+for the full results table. Apple M-series, 10 cores,
+`-DCMAKE_BUILD_TYPE=Release`, gateway and simulator sharing one machine.
+Micro-benchmarks are the median of 9 repetitions; macro rows are the median of
+3 full matrix runs.
 
-- Peak observed throughput: 23,742 events/sec sustained over 10s
-  (500 devices x 50 events/sec, 4 workers, queue capacity 50,
-  `--backpressure=block`), with zero dropped and zero malformed events.
-- Queue-wait latency at that peak: mean 36.2us, p50 <=100us, p99 <=500us.
-- Worker count made no difference to throughput in this matrix: 1, 2, 4 and
-  8 workers all accepted exactly 19,600 events at 200 devices x 10/sec. The
-  run is offered-load-limited, not gateway-limited (zero drops in every row),
-  so it measures what the simulator sent, not what the gateway could take.
-  Mean queue wait did move -- 45.8us / 46.9us / 38.0us / 57.8us for 1/2/4/8
-  workers -- i.e. 8 workers contend on the queue's single mutex for no
-  throughput gain.
-- Chaos vs baseline (100 devices x 10/sec for 15s, 14,800 events accepted
-  clean): 20% packet loss accepted 11,891 (-19.7%, matching the configured
-  rate); a +100-device spike at t=5s accepted 24,600 (+66%, matching the
-  166.7 average device-seconds); 200ms injected send latency accepted 6,600
-  (-55%) and *lowered* mean queue wait to 11.1us, because the delay gates
-  each device's next send rather than bursting -- it reduces offered load.
+- Peak observed throughput: 23,800 events/sec sustained over 10s (500 devices
+  x 50 events/sec, 4 workers, queue capacity 64, `--backpressure=block`), with
+  zero dropped and zero malformed events.
+- SPMC micro-benchmark (one producer, N consumers -- the shape the gateway
+  actually has): mutex 82.2 / 158 / 289 / 1308 ns per push at 1/2/4/8
+  consumers, lock-free 53.2 / 53.1 / 138 / 205 ns. The lock-free queue is
+  1.6x faster at one consumer and 6.4x faster at eight; the mutex queue
+  degrades sharply past four consumers while the lock-free one stays flat.
+- End-to-end across the full macro matrix, the two queues differed by less
+  than 2.5% on throughput in every row -- a null result, and the expected one.
+  The pipeline is offered-load-limited, not queue-limited: 200 devices x 10
+  events/sec offers 2,000 events/sec and both queues accept ~1,960 of them
+  with zero drops. No queue implementation can raise a ceiling the simulator
+  sets.
+- The lock-free queue showed *higher* mean queue-wait latency in most macro
+  rows. The direction was consistent, but run-to-run magnitudes varied by up
+  to 17x, so it is reported as a direction and not quantified. The mechanism
+  is that at these loads the queue is empty almost always, so nearly every
+  event pays the park/wake path rather than the lock-free fast path: the mutex
+  queue notifies under the very mutex its consumer waits on, while the
+  lock-free queue must fence, read its waiter count, and then take that mutex
+  anyway -- strictly more work when there is never a backlog to absorb.
+- Worker count still makes no difference to throughput, for the same
+  offered-load reason: 1, 2, 4 and 8 workers all land at ~1,960 events/sec.
+- Chaos scenarios behave identically on both queues: 20% packet loss and the
+  +100-device spike move throughput by the same amount either way.
 
-Reproduce: build the project, then run `python3 scripts/run_benchmarks.py`
-(takes a few minutes) and `./build/benchmarks/edgeflow-benchmarks`.
+**Conclusion: `BoundedQueue` (mutex) stays the production default.** The
+lock-free queue is decisively faster under saturation, and the gateway never
+reaches saturation. `LockFreeBoundedQueue` is kept, tested and benchmarked so
+the choice can be revisited if a future phase raises the offered load past the
+point where the queue becomes the bottleneck.
+
+Reproduce: build with `-DCMAKE_BUILD_TYPE=Release`, then run
+`python3 scripts/run_benchmarks.py --build-dir build-release` (several minutes)
+and `./build-release/benchmarks/edgeflow-benchmarks --benchmark_repetitions=9
+--benchmark_report_aggregates_only=true`.

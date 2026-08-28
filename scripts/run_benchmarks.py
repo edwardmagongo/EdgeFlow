@@ -194,8 +194,13 @@ def main():
 
     sink_file = Path(args.sink_file)
     rows = []
-    for queue_name, gateway_bin in gateway_bins.items():
-        for row_config in build_matrix():
+    # Rows outer, queues inner: the two binaries for a given row run back to
+    # back, so they see the same machine conditions. Running all of one queue's
+    # rows and then all of the other's lets any drift in background load over
+    # the several-minute run land entirely on whichever queue goes second --
+    # which is not a property of the queue.
+    for row_config in build_matrix():
+        for queue_name, gateway_bin in gateway_bins.items():
             label = row_config["label"]
             print(f"running: queue={queue_name} {label} ...", file=sys.stderr)
             result = run_one(gateway_bin, simulator_bin, sink_file,
