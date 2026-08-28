@@ -10,6 +10,7 @@ add_executable(edgeflow-tests
     test_simulator_config.cpp
     test_stats.cpp
     test_device_client_integration.cpp
+    test_timed_event.cpp
 )
 
 target_link_libraries(edgeflow-tests PRIVATE
