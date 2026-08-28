@@ -217,6 +217,22 @@ private:
         if (waiters_.load(std::memory_order_relaxed) == 0) {
             return;
         }
+        // This lock must be held across notify_one() itself, not just used to
+        // guard the condition variable's internal state -- it closes the
+        // second half of the wakeup guarantee. The seq_cst fence pair above
+        // only establishes that this producer observes waiters_ >= 1; it does
+        // NOT stop notify_one() from racing ahead of the consumer actually
+        // entering not_empty_.wait(lock), which would lose the wakeup. By
+        // holding wait_mutex_ here, either: (a) the consumer already holds it
+        // (about to call wait()), so this lock_guard blocks until wait()
+        // releases the mutex, at which point the notify reaches a
+        // genuinely-parked thread; or (b) the consumer hasn't reached that
+        // point yet, in which case it will observe the item/shutdown flag on
+        // its own next check before it parks. DO NOT move notify_one() outside
+        // this lock as a "performance optimization" (the common advice to
+        // avoid holding a lock across a condition-variable notify) --
+        // doing so reopens the lost-wakeup window that the seq_cst fences
+        // alone do not close.
         std::lock_guard<std::mutex> lock(wait_mutex_);
         not_empty_.notify_one();
     }
@@ -283,7 +299,12 @@ private:
     alignas(kCacheLineBytes) std::atomic<std::size_t> dequeue_pos_{0};
     std::atomic<bool> shutting_down_{false};
     // The parking apparatus. Touched by a producer only when waiters_ > 0.
-    std::atomic<std::size_t> waiters_{0};
+    // Given its own cache line: every push() reads waiters_ in
+    // notify_one_waiter(), and without this alignas it shares a line with
+    // dequeue_pos_, which every try_pop() CAS-hammers -- false sharing that
+    // would corrupt the Task 8-10 throughput benchmarks this queue exists to
+    // support.
+    alignas(kCacheLineBytes) std::atomic<std::size_t> waiters_{0};
     std::mutex wait_mutex_;
     std::condition_variable not_empty_;
 };
