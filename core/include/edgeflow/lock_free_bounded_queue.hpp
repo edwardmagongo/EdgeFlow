@@ -1,7 +1,9 @@
 #pragma once
 #include <atomic>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <mutex>
 #include <optional>
 #include <stdexcept>
 #include <thread>
@@ -15,9 +17,9 @@ namespace edgeflow {
 // A bounded lock-free multi-producer/multi-consumer queue: Dmitry Vyukov's
 // ring buffer, where each slot carries its own atomic sequence counter and
 // producers/consumers claim positions with a CAS on a shared cursor. No mutex
-// is taken on the push or non-blocking pop path.
+// is taken on the push path while consumers are awake.
 //
-// Deliberate differences from BoundedQueue, both covered by tests:
+// Deliberate differences from BoundedQueue, each covered by tests:
 //
 //   * Capacity is rounded UP to a power of two, with a floor of two slots, so
 //     the ring can index with a mask instead of a modulo. capacity() reports
@@ -41,8 +43,21 @@ namespace edgeflow {
 //   * T must be default-constructible, because the ring preallocates all slots
 //     at construction. BoundedQueue has no such requirement.
 //
-// pop() blocks by spinning and yielding. Task 3 replaces that with parking on a
-// condition variable; until then an idle worker burns a core.
+// THE BLOCKING pop(). pop() must block, because WorkerPool's drain loop depends
+// on it, and blocking means parking a thread -- something a strictly lock-free
+// structure cannot do. The resolution is a hybrid:
+//
+//   1. A bounded spin on the lock-free fast path, which covers the common case
+//      where an item is a few nanoseconds away.
+//   2. Failing that, register in waiters_ and park on a condition variable.
+//
+// A producer touches wait_mutex_ and not_empty_ ONLY when waiters_ is non-zero.
+// Under load -- queue non-empty, workers busy -- waiters_ stays 0 and no
+// producer ever takes a lock. The mutex appears only once a consumer has
+// actually gone to sleep.
+//
+// This is NOT a claim that the whole structure is lock-free. The fast path is;
+// the empty-queue wait is not. The distinction is stated rather than oversold.
 template <typename T>
 class LockFreeBoundedQueue {
     static_assert(std::is_default_constructible_v<T>,
@@ -67,10 +82,12 @@ public:
     // Non-blocking. Applies the configured backpressure policy when full.
     PushResult push(T item) {
         if (try_push(item)) {
+            notify_one_waiter();
             return PushResult::Accepted;
         }
         if (policy_ == BackpressurePolicy::DropOldest) {
             if (try_pop().has_value() && try_push(item)) {
+                notify_one_waiter();
                 return PushResult::DroppedOldest;
             }
             // Lost the freed slot to another producer; see the class comment.
@@ -83,20 +100,61 @@ public:
     // shutdown() has been called; items queued before shutdown are drained
     // first.
     std::optional<T> pop() {
-        while (true) {
+        // Phase 1: bounded spin. Covers the case where an item is imminent,
+        // without paying for a mutex or a context switch.
+        for (unsigned attempt = 0; attempt < kSpinAttempts; ++attempt) {
             if (auto item = try_pop()) {
                 return item;
             }
             if (shutting_down_.load(std::memory_order_acquire)) {
-                // An item may have arrived between the try_pop above and this
-                // check, so make one final attempt rather than dropping it.
                 return try_pop();
             }
             std::this_thread::yield();
         }
+
+        // Phase 2: park. The lock is taken once and held across iterations
+        // (wait() releases it while sleeping), because re-locking an already-
+        // held std::mutex on the next pass would deadlock.
+        std::unique_lock<std::mutex> lock(wait_mutex_);
+        while (true) {
+            waiters_.fetch_add(1, std::memory_order_relaxed);
+            // Publishes the registration before the re-check below reads the
+            // ring. Pairs with the fence in notify_one_waiter(); see the class
+            // comment on why release/acquire alone would lose wakeups.
+            std::atomic_thread_fence(std::memory_order_seq_cst);
+
+            // Re-check AFTER registering. A producer that pushed between the
+            // spin phase and this registration would have seen waiters_ == 0
+            // and skipped its notify, so without this we would sleep on an item
+            // that is already sitting in the ring.
+            auto item = try_pop();
+            const bool draining = shutting_down_.load(std::memory_order_acquire);
+
+            if (!item && !draining) {
+                not_empty_.wait(lock);
+                waiters_.fetch_sub(1, std::memory_order_relaxed);
+                continue;
+            }
+
+            waiters_.fetch_sub(1, std::memory_order_relaxed);
+            if (item) {
+                return item;
+            }
+            // Shutting down: one last attempt, so an item that landed between
+            // the try_pop above and here is still delivered rather than lost.
+            return try_pop();
+        }
     }
 
-    void shutdown() { shutting_down_.store(true, std::memory_order_release); }
+    void shutdown() {
+        shutting_down_.store(true, std::memory_order_release);
+        // Taken even though the flag is atomic: a consumer that has read the
+        // flag as false but not yet called wait() is holding this mutex, so
+        // acquiring it here guarantees the notify_all lands after that consumer
+        // is actually waiting rather than before.
+        std::lock_guard<std::mutex> lock(wait_mutex_);
+        not_empty_.notify_all();
+    }
 
     // Approximate under concurrency, exact when quiescent.
     std::size_t size() const {
@@ -120,6 +178,10 @@ private:
     // below cannot overflow in any realistic run.
     static constexpr std::size_t kMaxCapacity = std::size_t{1} << 30;
     static constexpr std::size_t kCacheLineBytes = 64;
+    // Long enough to ride out the microsecond-scale gaps between a worker
+    // finishing an event and the next one arriving; short enough that a
+    // genuinely idle worker reaches the parking path promptly.
+    static constexpr unsigned kSpinAttempts = 64;
 
     static std::size_t validated_capacity(std::size_t capacity) {
         if (capacity == 0) {
@@ -141,6 +203,22 @@ private:
         // moves. Rounding 1 up to 2 is the same kind of documented capacity
         // adjustment as rounding 50 up to 64.
         return rounded < 2 ? 2 : rounded;
+    }
+
+    // Wakes one parked consumer, if any. The waiters_ check is what keeps the
+    // hot path lock-free: with every worker busy this reads one atomic and
+    // returns, never touching the mutex.
+    void notify_one_waiter() {
+        // Orders the push's publication before this read of waiters_. Pairs
+        // with the fence in pop(). Without BOTH fences the producer may read a
+        // stale waiters_ == 0 while the consumer reads a stale empty ring, and
+        // the wakeup is lost.
+        std::atomic_thread_fence(std::memory_order_seq_cst);
+        if (waiters_.load(std::memory_order_relaxed) == 0) {
+            return;
+        }
+        std::lock_guard<std::mutex> lock(wait_mutex_);
+        not_empty_.notify_one();
     }
 
     bool try_push(T& item) {
@@ -204,6 +282,10 @@ private:
     alignas(kCacheLineBytes) std::atomic<std::size_t> enqueue_pos_{0};
     alignas(kCacheLineBytes) std::atomic<std::size_t> dequeue_pos_{0};
     std::atomic<bool> shutting_down_{false};
+    // The parking apparatus. Touched by a producer only when waiters_ > 0.
+    std::atomic<std::size_t> waiters_{0};
+    std::mutex wait_mutex_;
+    std::condition_variable not_empty_;
 };
 
 } // namespace edgeflow
