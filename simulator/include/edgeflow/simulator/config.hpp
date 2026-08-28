@@ -1,4 +1,5 @@
 #pragma once
+#include <chrono>
 #include <cstdint>
 #include <string>
 
@@ -10,6 +11,12 @@ struct Config {
     std::size_t device_count = 1000;
     double events_per_second_per_device = 1.0;
     std::size_t duration_seconds = 30;
+
+    // Chaos scenarios, all off (zero/0.0) by default.
+    std::chrono::milliseconds chaos_latency{0};
+    double chaos_packet_loss_percent = 0.0;
+    std::size_t chaos_device_spike_count = 0;
+    std::size_t chaos_device_spike_at_sec = 0;
 };
 
 // Parses argv into a Config. Throws std::invalid_argument on bad input.

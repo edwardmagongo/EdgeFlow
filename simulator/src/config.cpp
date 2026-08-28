@@ -49,6 +49,18 @@ Config parse_args(int argc, char** argv) {
             config.events_per_second_per_device = parse_positive_double(edgeflow::arg_value(arg), "--rate");
         } else if (arg.starts_with("--duration=")) {
             config.duration_seconds = edgeflow::parse_positive_size(edgeflow::arg_value(arg), "--duration");
+        } else if (arg.starts_with("--chaos-latency-ms=")) {
+            config.chaos_latency = std::chrono::milliseconds(
+                edgeflow::parse_positive_size(edgeflow::arg_value(arg), "--chaos-latency-ms"));
+        } else if (arg.starts_with("--chaos-packet-loss-percent=")) {
+            config.chaos_packet_loss_percent =
+                edgeflow::parse_percentage(edgeflow::arg_value(arg), "--chaos-packet-loss-percent");
+        } else if (arg.starts_with("--chaos-device-spike-at-sec=")) {
+            config.chaos_device_spike_at_sec = edgeflow::parse_positive_size(
+                edgeflow::arg_value(arg), "--chaos-device-spike-at-sec");
+        } else if (arg.starts_with("--chaos-device-spike=")) {
+            config.chaos_device_spike_count =
+                edgeflow::parse_positive_size(edgeflow::arg_value(arg), "--chaos-device-spike");
         } else {
             throw std::invalid_argument("unknown argument: " + std::string(arg));
         }
@@ -59,6 +71,11 @@ Config parse_args(int argc, char** argv) {
     }
     if (config.device_count > 100000) {
         throw std::invalid_argument("--devices exceeds maximum of 100000");
+    }
+    if (config.chaos_device_spike_count > 0 &&
+        config.chaos_device_spike_at_sec >= config.duration_seconds) {
+        throw std::invalid_argument(
+            "--chaos-device-spike-at-sec must be less than --duration for the spike to occur");
     }
     return config;
 }
