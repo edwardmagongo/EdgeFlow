@@ -61,11 +61,22 @@ int main(int argc, char** argv) {
         boost::asio::steady_timer stop_timer(*contexts[0]);
         stop_timer.expires_after(std::chrono::seconds(config.duration_seconds));
         stop_timer.async_wait([&](const boost::system::error_code&) {
-            for (auto& client : clients) {
-                client->stop();
-            }
-            for (auto& context : contexts) {
-                context->stop();
+            // Each DeviceClient is bound to a single io_context and does no
+            // internal synchronization (see the comment in
+            // tests/test_device_client_integration.cpp), so client->stop()
+            // must run on the thread that owns that client's context, not on
+            // context 0 unconditionally. clients[j]'s owning context is
+            // contexts[j % thread_count] (make_client's index/context-index
+            // mapping), so post one stop-sweep per context onto that context
+            // itself, then have the context stop itself from its own thread.
+            for (std::size_t i = 0; i < config.thread_count; ++i) {
+                boost::asio::post(*contexts[i], [&clients, &contexts, i,
+                                                  thread_count = config.thread_count] {
+                    for (std::size_t j = i; j < clients.size(); j += thread_count) {
+                        clients[j]->stop();
+                    }
+                    contexts[i]->stop();
+                });
             }
         });
 
