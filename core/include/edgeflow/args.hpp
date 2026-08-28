@@ -1,4 +1,5 @@
 #pragma once
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <stdexcept>
@@ -44,6 +45,28 @@ inline std::uint16_t parse_port(std::string_view value) {
         throw std::invalid_argument("--port must be between 1 and 65535, got: " + std::string(value));
     }
     return static_cast<std::uint16_t>(raw);
+}
+
+// Parses a percentage flag value (0-100 inclusive). Throws
+// std::invalid_argument on invalid or out-of-range input.
+inline double parse_percentage(std::string_view value, std::string_view flag_name) {
+    if (value.empty() || value.front() == '-') {
+        throw std::invalid_argument("invalid value for " + std::string(flag_name) + ": " + std::string(value));
+    }
+    std::size_t pos = 0;
+    double parsed;
+    try {
+        parsed = std::stod(std::string(value), &pos);
+    } catch (const std::exception&) {
+        throw std::invalid_argument("invalid value for " + std::string(flag_name) + ": " + std::string(value));
+    }
+    if (pos != value.size()) {
+        throw std::invalid_argument("invalid value for " + std::string(flag_name) + ": " + std::string(value));
+    }
+    if (!std::isfinite(parsed) || parsed < 0.0 || parsed > 100.0) {
+        throw std::invalid_argument(std::string(flag_name) + " must be between 0 and 100, got: " + std::string(value));
+    }
+    return parsed;
 }
 
 } // namespace edgeflow
