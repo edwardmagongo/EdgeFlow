@@ -39,3 +39,45 @@ TEST(GatewayConfig, RejectsUnknownFlag) {
     char* argv[] = {prog, bogus};
     EXPECT_THROW(parse_args(2, argv), std::invalid_argument);
 }
+
+TEST(GatewayConfig, RejectsNegativeWorkers) {
+    char prog[] = "edgeflow-gateway";
+    char workers[] = "--workers=-1";
+    char* argv[] = {prog, workers};
+    EXPECT_THROW(parse_args(2, argv), std::invalid_argument);
+}
+
+TEST(GatewayConfig, RejectsPortAboveRange) {
+    char prog[] = "edgeflow-gateway";
+    char port[] = "--port=70000";
+    char* argv[] = {prog, port};
+    EXPECT_THROW(parse_args(2, argv), std::invalid_argument);
+}
+
+TEST(GatewayConfig, RejectsPortZero) {
+    char prog[] = "edgeflow-gateway";
+    char port[] = "--port=0";
+    char* argv[] = {prog, port};
+    EXPECT_THROW(parse_args(2, argv), std::invalid_argument);
+}
+
+TEST(GatewayConfig, RejectsPortWithTrailingJunk) {
+    char prog[] = "edgeflow-gateway";
+    char port[] = "--port=8080junk";
+    char* argv[] = {prog, port};
+    EXPECT_THROW(parse_args(2, argv), std::invalid_argument);
+}
+
+TEST(GatewayConfig, RejectsZeroQueueCapacity) {
+    char prog[] = "edgeflow-gateway";
+    char capacity[] = "--queue-capacity=0";
+    char* argv[] = {prog, capacity};
+    EXPECT_THROW(parse_args(2, argv), std::invalid_argument);
+}
+
+TEST(GatewayConfig, RejectsUnknownBackpressureValue) {
+    char prog[] = "edgeflow-gateway";
+    char policy[] = "--backpressure=nonsense";
+    char* argv[] = {prog, policy};
+    EXPECT_THROW(parse_args(2, argv), std::invalid_argument);
+}

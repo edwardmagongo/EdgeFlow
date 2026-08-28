@@ -16,6 +16,7 @@ private:
     void accept();
 
     boost::asio::ip::tcp::acceptor acceptor_;
+    boost::asio::steady_timer retry_timer_;
     edgeflow::BoundedQueue<edgeflow::Event>& queue_;
     edgeflow::BackpressurePolicy policy_;
 };

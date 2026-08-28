@@ -11,6 +11,9 @@ namespace edgeflow::gateway {
 // onto the shared queue. On BackpressurePolicy::Block, when the queue
 // rejects a push, the connection stops reading and retries the push on a
 // short timer instead of blocking the I/O thread.
+//
+// Assumes io_context.run() is called from a single thread; this class is not
+// internally synchronized for a multi-threaded io_context (no strand).
 class Connection : public std::enable_shared_from_this<Connection> {
 public:
     Connection(boost::asio::ip::tcp::socket socket,
@@ -26,7 +29,9 @@ private:
     void retry_push(edgeflow::Event event);
 
     boost::asio::ip::tcp::socket socket_;
-    boost::asio::streambuf buffer_;
+    // Capped at 1 MB so a client that never sends a newline can't grow this
+    // buffer unboundedly and exhaust memory.
+    boost::asio::streambuf buffer_{1 << 20};
     edgeflow::BoundedQueue<edgeflow::Event>& queue_;
     edgeflow::BackpressurePolicy policy_;
     boost::asio::steady_timer retry_timer_;
