@@ -2,6 +2,7 @@ add_library(edgeflow-core
     src/event.cpp
     src/batcher.cpp
     src/file_sink.cpp
+    src/worker_pool.cpp
 )
 
 target_include_directories(edgeflow-core PUBLIC include)

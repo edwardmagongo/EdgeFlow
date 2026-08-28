@@ -4,6 +4,7 @@ add_executable(edgeflow-tests
     test_bounded_queue.cpp
     test_batcher.cpp
     test_file_sink.cpp
+    test_worker_pool.cpp
 )
 
 target_link_libraries(edgeflow-tests PRIVATE edgeflow-core GTest::gtest_main Threads::Threads)
