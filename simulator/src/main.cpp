@@ -2,8 +2,8 @@
 #include <iostream>
 #include <memory>
 #include <vector>
-#include "device_client.hpp"
 #include "edgeflow/simulator/config.hpp"
+#include "edgeflow/simulator/device_client.hpp"
 
 int main(int argc, char** argv) {
     edgeflow::simulator::Config config;

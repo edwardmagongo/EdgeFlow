@@ -4,6 +4,7 @@
 #include <string>
 #include "edgeflow/bounded_queue.hpp"
 #include "edgeflow/event.hpp"
+#include "edgeflow/stats.hpp"
 
 namespace edgeflow::gateway {
 
@@ -18,7 +19,8 @@ class Connection : public std::enable_shared_from_this<Connection> {
 public:
     Connection(boost::asio::ip::tcp::socket socket,
                edgeflow::BoundedQueue<edgeflow::Event>& queue,
-               edgeflow::BackpressurePolicy policy);
+               edgeflow::BackpressurePolicy policy,
+               edgeflow::Stats& stats);
 
     void start();
 
@@ -34,6 +36,7 @@ private:
     boost::asio::streambuf buffer_{1 << 20};
     edgeflow::BoundedQueue<edgeflow::Event>& queue_;
     edgeflow::BackpressurePolicy policy_;
+    edgeflow::Stats& stats_;
     boost::asio::steady_timer retry_timer_;
 };
 

@@ -17,7 +17,7 @@ elseif(EDGEFLOW_SANITIZE STREQUAL "thread")
 endif()
 
 include(cmake/Dependencies.cmake)
-find_package(Boost 1.75 REQUIRED COMPONENTS system)
+find_package(Boost 1.75 REQUIRED COMPONENTS system CONFIG)
 
 enable_testing()
 

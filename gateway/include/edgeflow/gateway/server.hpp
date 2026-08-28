@@ -2,6 +2,7 @@
 #include <boost/asio.hpp>
 #include "edgeflow/bounded_queue.hpp"
 #include "edgeflow/event.hpp"
+#include "edgeflow/stats.hpp"
 
 namespace edgeflow::gateway {
 
@@ -10,7 +11,8 @@ public:
     Server(boost::asio::io_context& io_context,
            std::uint16_t port,
            edgeflow::BoundedQueue<edgeflow::Event>& queue,
-           edgeflow::BackpressurePolicy policy);
+           edgeflow::BackpressurePolicy policy,
+           edgeflow::Stats& stats);
 
 private:
     void accept();
@@ -19,6 +21,7 @@ private:
     boost::asio::steady_timer retry_timer_;
     edgeflow::BoundedQueue<edgeflow::Event>& queue_;
     edgeflow::BackpressurePolicy policy_;
+    edgeflow::Stats& stats_;
 };
 
 } // namespace edgeflow::gateway

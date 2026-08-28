@@ -1,6 +1,6 @@
-#include "server.hpp"
+#include "edgeflow/gateway/server.hpp"
 #include <iostream>
-#include "connection.hpp"
+#include "edgeflow/gateway/connection.hpp"
 
 namespace edgeflow::gateway {
 
@@ -9,11 +9,13 @@ using boost::asio::ip::tcp;
 Server::Server(boost::asio::io_context& io_context,
                std::uint16_t port,
                edgeflow::BoundedQueue<edgeflow::Event>& queue,
-               edgeflow::BackpressurePolicy policy)
+               edgeflow::BackpressurePolicy policy,
+               edgeflow::Stats& stats)
     : acceptor_(io_context, tcp::endpoint(tcp::v4(), port)),
       retry_timer_(io_context),
       queue_(queue),
-      policy_(policy) {
+      policy_(policy),
+      stats_(stats) {
     accept();
 }
 
@@ -37,7 +39,7 @@ void Server::accept() {
                 });
                 return;
             }
-            std::make_shared<Connection>(std::move(socket), queue_, policy_)->start();
+            std::make_shared<Connection>(std::move(socket), queue_, policy_, stats_)->start();
             accept();
         });
 }

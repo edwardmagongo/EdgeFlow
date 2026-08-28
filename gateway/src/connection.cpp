@@ -1,4 +1,4 @@
-#include "connection.hpp"
+#include "edgeflow/gateway/connection.hpp"
 #include <istream>
 #include <utility>
 
@@ -8,10 +8,12 @@ using boost::asio::ip::tcp;
 
 Connection::Connection(tcp::socket socket,
                         edgeflow::BoundedQueue<edgeflow::Event>& queue,
-                        edgeflow::BackpressurePolicy policy)
+                        edgeflow::BackpressurePolicy policy,
+                        edgeflow::Stats& stats)
     : socket_(std::move(socket)),
       queue_(queue),
       policy_(policy),
+      stats_(stats),
       retry_timer_(socket_.get_executor()) {}
 
 void Connection::start() { read_line(); }
@@ -33,6 +35,7 @@ void Connection::read_line() {
 void Connection::handle_line(const std::string& line) {
     auto event = edgeflow::parse_event(line);
     if (!event) {
+        stats_.record_malformed();
         read_line();
         return;
     }
@@ -41,12 +44,20 @@ void Connection::handle_line(const std::string& line) {
 
 void Connection::push_event(edgeflow::Event event) {
     auto result = queue_.push(event);
-    if (result != edgeflow::PushResult::RejectedBackpressure) {
+    if (result == edgeflow::PushResult::Accepted) {
+        stats_.record_accepted();
+        read_line();
+        return;
+    }
+    if (result == edgeflow::PushResult::DroppedOldest) {
+        stats_.record_dropped_oldest();
         read_line();
         return;
     }
 
+    // RejectedBackpressure.
     if (policy_ == edgeflow::BackpressurePolicy::DropNewest) {
+        stats_.record_dropped_newest();
         read_line(); // silently drop; keep reading
         return;
     }
@@ -65,9 +76,14 @@ void Connection::retry_push(edgeflow::Event event) {
         auto result = queue_.push(event);
         if (result == edgeflow::PushResult::RejectedBackpressure) {
             retry_push(std::move(event));
-        } else {
-            read_line();
+            return;
         }
+        if (result == edgeflow::PushResult::Accepted) {
+            stats_.record_accepted();
+        } else {
+            stats_.record_dropped_oldest();
+        }
+        read_line();
     });
 }
 

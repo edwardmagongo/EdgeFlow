@@ -1,4 +1,4 @@
-#include "device_client.hpp"
+#include "edgeflow/simulator/device_client.hpp"
 #include <algorithm>
 #include <ctime>
 #include <iomanip>
@@ -32,8 +32,13 @@ DeviceClient::DeviceClient(boost::asio::io_context& io_context,
       host_(host),
       port_(port),
       device_id_(device_id),
+      // Clamp the interval in double space before casting to long: for a
+      // tiny events_per_second (e.g. 1e-300), 1000.0/events_per_second is
+      // +inf, and casting an out-of-range double to long is undefined
+      // behavior. Clamping first guarantees the cast operand is always
+      // in-range (1 to 3,600,000).
       send_interval_(std::chrono::milliseconds(
-          std::max<long>(1, static_cast<long>(1000.0 / events_per_second)))) {}
+          static_cast<long>(std::clamp(1000.0 / events_per_second, 1.0, 3'600'000.0)))) {}
 
 void DeviceClient::start() { connect(); }
 

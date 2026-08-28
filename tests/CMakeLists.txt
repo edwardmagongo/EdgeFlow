@@ -8,13 +8,16 @@ add_executable(edgeflow-tests
     test_args.cpp
     test_gateway_config.cpp
     test_simulator_config.cpp
+    test_stats.cpp
+    test_device_client_integration.cpp
 )
 
 target_link_libraries(edgeflow-tests PRIVATE
     edgeflow-core
-    edgeflow-gateway-config
-    edgeflow-simulator-config
+    edgeflow-gateway-lib
+    edgeflow-simulator-lib
     GTest::gtest_main
+    Boost::system
     Threads::Threads
 )
 

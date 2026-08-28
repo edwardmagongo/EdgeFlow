@@ -1,11 +1,13 @@
 #include <boost/asio.hpp>
+#include <functional>
 #include <iostream>
 #include "edgeflow/batcher.hpp"
 #include "edgeflow/bounded_queue.hpp"
 #include "edgeflow/file_sink.hpp"
 #include "edgeflow/gateway/config.hpp"
+#include "edgeflow/gateway/server.hpp"
+#include "edgeflow/stats.hpp"
 #include "edgeflow/worker_pool.hpp"
-#include "server.hpp"
 
 int main(int argc, char** argv) {
     edgeflow::gateway::Config config;
@@ -22,6 +24,7 @@ int main(int argc, char** argv) {
         edgeflow::Batcher batcher(config.batch_size, config.batch_age,
                                     [&sink](std::vector<edgeflow::Event> batch) { sink.consume(batch); });
         edgeflow::WorkerPool pool(queue, batcher, config.workers);
+        edgeflow::Stats stats;
 
         boost::asio::io_context io_context;
 
@@ -35,7 +38,25 @@ int main(int argc, char** argv) {
 
         pool.start();
 
-        edgeflow::gateway::Server server(io_context, config.port, queue, config.backpressure);
+        edgeflow::gateway::Server server(io_context, config.port, queue, config.backpressure, stats);
+
+        // Periodic flush timer: Batcher only checks its age threshold inside
+        // add_event(), so without this an idle gateway (no new events arriving)
+        // could leave a partial batch unflushed indefinitely. This timer runs
+        // independently of event arrivals to keep --batch-age-ms an actual
+        // latency bound, supplementing (not replacing) the in-add_event checks.
+        boost::asio::steady_timer flush_timer(io_context);
+        std::function<void()> arm_flush_timer = [&]() {
+            flush_timer.expires_after(config.batch_age);
+            flush_timer.async_wait([&](const boost::system::error_code& error) {
+                if (error) {
+                    return; // timer canceled (shutdown); do not re-arm.
+                }
+                batcher.flush();
+                arm_flush_timer();
+            });
+        };
+        arm_flush_timer();
 
         std::cout << "edgeflow-gateway listening on port " << config.port
                   << " (workers=" << config.workers
@@ -45,7 +66,11 @@ int main(int argc, char** argv) {
 
         pool.stop();
         batcher.flush();
-        std::cout << "edgeflow-gateway shut down\n";
+        auto snapshot = stats.snapshot();
+        std::cout << "edgeflow-gateway shut down (accepted=" << snapshot.events_accepted
+                  << ", dropped_oldest=" << snapshot.events_dropped_oldest
+                  << ", dropped_newest=" << snapshot.events_dropped_newest
+                  << ", malformed=" << snapshot.events_malformed << ")\n";
         return 0;
     } catch (const std::exception& e) {
         std::cerr << "edgeflow-gateway: " << e.what() << '\n';
