@@ -1,4 +1,5 @@
 #include "device_client.hpp"
+#include <algorithm>
 #include <ctime>
 #include <iomanip>
 #include <sstream>
@@ -32,7 +33,7 @@ DeviceClient::DeviceClient(boost::asio::io_context& io_context,
       port_(port),
       device_id_(device_id),
       send_interval_(std::chrono::milliseconds(
-          static_cast<long>(1000.0 / events_per_second))) {}
+          std::max<long>(1, static_cast<long>(1000.0 / events_per_second)))) {}
 
 void DeviceClient::start() { connect(); }
 
@@ -61,7 +62,9 @@ void DeviceClient::schedule_next_send() {
     timer_.expires_after(send_interval_);
     timer_.async_wait([this, self](const boost::system::error_code& error) {
         if (error || stopped_) return;
-        send_event();
+        if (!write_in_flight_) {
+            send_event();
+        }
         schedule_next_send();
     });
 }
@@ -78,8 +81,11 @@ void DeviceClient::send_event() {
     };
     auto line = std::make_shared<std::string>(edgeflow::serialize_event(event) + "\n");
     auto self = shared_from_this();
+    write_in_flight_ = true;
     boost::asio::async_write(socket_, boost::asio::buffer(*line),
-        [self, line](const boost::system::error_code&, std::size_t) {});
+        [this, self, line](const boost::system::error_code&, std::size_t) {
+            write_in_flight_ = false;
+        });
 }
 
 } // namespace edgeflow::simulator

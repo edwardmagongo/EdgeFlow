@@ -33,6 +33,7 @@ private:
     std::int64_t device_id_;
     std::chrono::milliseconds send_interval_;
     bool stopped_ = false;
+    bool write_in_flight_ = false;
 };
 
 } // namespace edgeflow::simulator

@@ -124,3 +124,24 @@ TEST(SimulatorConfig, ParsesPort) {
     auto config = parse_args(2, argv);
     EXPECT_EQ(config.port, 8080);
 }
+
+TEST(SimulatorConfig, RejectsInfiniteRate) {
+    char prog[] = "edgeflow-simulator";
+    char rate[] = "--rate=inf";
+    char* argv[] = {prog, rate};
+    EXPECT_THROW(parse_args(2, argv), std::invalid_argument);
+}
+
+TEST(SimulatorConfig, RejectsNanRate) {
+    char prog[] = "edgeflow-simulator";
+    char rate[] = "--rate=nan";
+    char* argv[] = {prog, rate};
+    EXPECT_THROW(parse_args(2, argv), std::invalid_argument);
+}
+
+TEST(SimulatorConfig, RejectsDevicesAboveMaximum) {
+    char prog[] = "edgeflow-simulator";
+    char devices[] = "--devices=200000";
+    char* argv[] = {prog, devices};
+    EXPECT_THROW(parse_args(2, argv), std::invalid_argument);
+}
