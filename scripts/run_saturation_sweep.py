@@ -5,14 +5,33 @@ reports where -- and whether -- the gateway saturates.
 Each rung is classified, because "the generator fell short" and "the gateway
 saturated" both look like accepted < offered:
 
-  * generator-limited : the simulator sent less than 95% of the target. The rung
-                        says nothing about the gateway and is excluded from the
-                        knee.
-  * saturated         : the simulator hit its target and the gateway dropped
-                        events. The gateway is the bottleneck.
+  * generator-limited : the simulator sent less than 95% of the target, AND
+                        queue-wait stayed close to this queue's own baseline.
+                        The rung says nothing about the gateway and is
+                        excluded from the knee.
+  * gateway-limited   : the simulator sent less than 95% of the target, but
+                        queue_wait_p99_us was sharply elevated relative to
+                        this queue's own lowest-rung baseline. The gateway is
+                        backpressuring the simulator (TCP-level pushback under
+                        --backpressure=block), which is itself evidence the
+                        gateway is the bottleneck -- see the note below.
+  * saturated         : the simulator hit its target and the gateway's own
+                        drop counters are nonzero. The gateway is the
+                        bottleneck. NOTE: this script always runs the gateway
+                        with --backpressure=block, under which push() only
+                        ever returns Accepted or RejectedBackpressure --
+                        dropped_oldest/dropped_newest require the DropOldest/
+                        DropNewest policy, which this script never selects.
+                        So `saturated` is not reachable in practice today; it
+                        is kept as a classification (rather than removed) so
+                        the script stays correct if the backpressure policy is
+                        ever made configurable. `gateway-limited` is the
+                        signal that actually fires under Block.
   * clean             : target met, nothing dropped.
 
-The knee is the highest clean rung.
+The knee is the highest clean rung. A queue with `gateway-limited` rows is
+more informative than one with only `generator-limited` rows: it means the
+gateway measurably saturated even though nothing was dropped.
 
 Usage:
     python3 scripts/run_saturation_sweep.py [--build-dir build-release]
@@ -38,6 +57,18 @@ SENT_RE = re.compile(r"(?P<sent>\d+) events sent")
 # Offered events/sec. The fleet is held constant and per-device rate is scaled,
 # so socket count stays fixed and event rate is the only variable.
 LADDER = [25_000, 50_000, 100_000, 200_000, 400_000, 800_000]
+
+# How much a rung's queue_wait_p99_us must exceed that queue's own baseline
+# (the queue_wait_p99_us of its LADDER[0] rung, the least-contended point on
+# the ladder) before a generator-limited rung is reclassified as
+# gateway-limited. An order-of-magnitude increase is a strong signal of real
+# queueing delay building up inside the gateway, not just measurement jitter
+# at low load (baseline p99s on an idle-ish queue are typically single- to
+# low-double-digit microseconds, so ordinary noise would need a very unlucky
+# sample to cross a 10x bar). The comparison is baseline-relative per queue
+# per run, not an absolute microsecond constant, so it self-calibrates across
+# machines and queue implementations instead of relying on one fixed cutoff.
+GATEWAY_LIMITED_MULTIPLIER = 10
 
 FIELDNAMES = [
     "target_events_per_sec", "queue", "devices", "rate_per_device", "duration_s",
@@ -112,7 +143,10 @@ def run_rung(gateway_bin, simulator_bin, sink_file, target, queue, *,
     })
 
     # Classification. The generator check comes first: if the simulator never
-    # offered the load, the gateway's behaviour at this rung is meaningless.
+    # offered the load, the gateway's behaviour at this rung is meaningless
+    # *unless* queue-wait says otherwise -- that reclassification needs the
+    # whole sweep's baseline rungs, so it happens later, in
+    # reclassify_gateway_limited(), once every rung has been run.
     if sent < 0.95 * target * duration:
         result["classification"] = "generator-limited"
     elif dropped > 0:
@@ -146,6 +180,39 @@ def aggregate(reps):
     return row
 
 
+def reclassify_gateway_limited(rows, baseline_target, multiplier=GATEWAY_LIMITED_MULTIPLIER):
+    """Second pass over the aggregated rows: turn generator-limited rungs into
+    gateway-limited where queue-wait says the gateway, not the simulator, is
+    the reason offered load fell short.
+
+    Runs after the whole sweep (not inside run_rung) because the baseline is
+    each queue's own LADDER[0] rung, which isn't known as an aggregated median
+    until that rung's repetitions have all been collapsed.
+    """
+    queues = {r["queue"] for r in rows if not r.get("error")}
+    for queue in queues:
+        baseline_row = next(
+            (r for r in rows if r["queue"] == queue
+             and r["target_events_per_sec"] == baseline_target and not r.get("error")),
+            None)
+        if baseline_row is None:
+            continue  # no usable baseline for this queue; leave as generator-limited
+        baseline_qwait = baseline_row.get("queue_wait_p99_us")
+        if not isinstance(baseline_qwait, (int, float)):
+            continue
+        # Floor the baseline at 1us so a queue that happened to see zero
+        # queue-wait at the lowest rung doesn't make the multiplier trivially
+        # satisfied by any nonzero later reading.
+        baseline_qwait = max(baseline_qwait, 1)
+        for row in rows:
+            if (row["queue"] != queue or row.get("error")
+                    or row.get("classification") != "generator-limited"):
+                continue
+            qwait = row.get("queue_wait_p99_us")
+            if isinstance(qwait, (int, float)) and qwait >= multiplier * baseline_qwait:
+                row["classification"] = "gateway-limited"
+
+
 def write_csv(path, rows):
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="") as handle:
@@ -167,6 +234,14 @@ def write_markdown(path, rows, knees):
         "A rung is only a valid statement about the gateway when the simulator",
         "actually offered the load: `generator-limited` rungs are excluded from the",
         "knee, because they measure the load generator, not the gateway.",
+        "",
+        "This sweep always runs the gateway with `--backpressure=block`, under which",
+        "the drop counters never increment (`saturated` is unreachable in practice",
+        "under Block). A gateway that is genuinely saturated instead shows up as",
+        "`gateway-limited`: offered load fell short (same size check as",
+        f"`generator-limited`) AND `queue_wait_p99_us` was at least "
+        f"{GATEWAY_LIMITED_MULTIPLIER}x that queue's own baseline (its lowest rung, "
+        f"target={LADDER[0]:,} events/sec) -- i.e. real queueing delay, not generator jitter.",
         "",
     ]
     for queue, knee in knees.items():
@@ -236,18 +311,51 @@ def main():
                       f"-> {row['classification']}", file=sys.stderr)
             rows.append(row)
 
+    reclassify_gateway_limited(rows, baseline_target=LADDER[0])
+
     knees = {}
     for queue in gateway_bins:
-        clean = [r for r in rows if r["queue"] == queue and r.get("classification") == "clean"]
-        saturated = [r for r in rows if r["queue"] == queue and r.get("classification") == "saturated"]
+        q_rows = [r for r in rows if r["queue"] == queue]
+        clean = [r for r in q_rows if r.get("classification") == "clean"]
+        saturated = [r for r in q_rows if r.get("classification") == "saturated"]
+        gateway_limited = [r for r in q_rows if r.get("classification") == "gateway-limited"]
+
+        # Guard every max()/min() with default=None: a queue can now have
+        # saturated or gateway-limited rows with zero clean rows (e.g. it
+        # never once ran clean before hitting trouble), and a queue where
+        # every valid rung came back gateway-limited has zero clean AND zero
+        # saturated rows. Both used to be unreachable (saturated never fired
+        # under Block) but gateway-limited makes them live paths.
+        clean_max = max((r["target_events_per_sec"] for r in clean), default=None)
+
         if saturated:
-            knees[queue] = (f"knee at {max(r['target_events_per_sec'] for r in clean)} "
-                            f"events/sec offered; saturates by "
-                            f"{min(r['target_events_per_sec'] for r in saturated)}")
+            saturated_min = min((r["target_events_per_sec"] for r in saturated), default=None)
+            if clean_max is not None:
+                knees[queue] = (f"knee at {clean_max} events/sec offered; saturates "
+                                f"(drops events) by {saturated_min} events/sec offered")
+            else:
+                knees[queue] = (f"gateway drops events starting at {saturated_min} "
+                                f"events/sec offered; no clean rung was observed below it "
+                                f"to report a knee from.")
+        elif gateway_limited:
+            # No drops (expected under --backpressure=block), but queue-wait
+            # climbing >= GATEWAY_LIMITED_MULTIPLIER x baseline is still a real
+            # saturation signal -- more informative than a bare
+            # generator-limited row would have been, so call it out plainly.
+            gw_min = min((r["target_events_per_sec"] for r in gateway_limited), default=None)
+            if clean_max is not None:
+                knees[queue] = (f"knee at {clean_max} events/sec offered; queue-wait signal "
+                                f"shows the gateway saturating (no drops under Block policy) "
+                                f"starting at {gw_min} events/sec offered")
+            else:
+                knees[queue] = (f"every valid rung was gateway-limited: queue_wait_p99_us "
+                                f"was >= {GATEWAY_LIMITED_MULTIPLIER}x baseline starting at "
+                                f"{gw_min} events/sec offered, with no clean rung observed to "
+                                f"report a knee from.")
         elif clean:
             knees[queue] = (f"never saturated: clean at every valid rung up to "
-                            f"{max(r['target_events_per_sec'] for r in clean)} events/sec "
-                            f"offered. The ceiling is above this and was not reached.")
+                            f"{clean_max} events/sec offered. The ceiling is above this "
+                            f"and was not reached.")
         else:
             knees[queue] = "no valid rung: every rung was generator-limited or failed."
 
