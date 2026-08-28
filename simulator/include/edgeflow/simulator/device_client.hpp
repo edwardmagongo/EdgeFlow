@@ -28,6 +28,10 @@ public:
     void start();
     void stop();
 
+    // Total events written to the socket by this client. Incremented only on the
+    // owning io_context thread; read after that thread has finished.
+    std::uint64_t events_sent() const { return events_sent_; }
+
 private:
     void connect();
     void schedule_next_send();
@@ -48,6 +52,7 @@ private:
     // One per client. DeviceClient is not shared across io_context threads, so
     // this needs no synchronisation.
     edgeflow::CachedIsoTimestamp timestamp_;
+    std::uint64_t events_sent_ = 0;
     std::mt19937 chaos_rng_;
     std::uniform_real_distribution<double> chaos_dist_{0.0, 100.0};
     bool stopped_ = false;

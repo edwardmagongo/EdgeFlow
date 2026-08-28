@@ -1,4 +1,5 @@
 #include <boost/asio.hpp>
+#include <cstdint>
 #include <iostream>
 #include <memory>
 #include <vector>
@@ -61,7 +62,15 @@ int main(int argc, char** argv) {
                   << config.duration_seconds << "s\n";
 
         io_context.run();
-        std::cout << "edgeflow-simulator: done (" << clients.size() << " total devices)\n";
+
+        // Summed after io_context.run() returns, so every client's counter is
+        // final and no synchronisation is needed.
+        std::uint64_t events_sent = 0;
+        for (const auto& client : clients) {
+            events_sent += client->events_sent();
+        }
+        std::cout << "edgeflow-simulator: done (" << clients.size()
+                  << " total devices, " << events_sent << " events sent)\n";
     } catch (const std::exception& e) {
         std::cerr << "edgeflow-simulator: " << e.what() << '\n';
         return 1;

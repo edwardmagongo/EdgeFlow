@@ -101,6 +101,7 @@ void DeviceClient::do_send() {
         -122.4194,
         "telemetry",
     };
+    ++events_sent_;
     auto line = std::make_shared<std::string>(edgeflow::serialize_event(event) + "\n");
     auto self = shared_from_this();
     boost::asio::async_write(socket_, boost::asio::buffer(*line),
