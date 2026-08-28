@@ -23,4 +23,5 @@ enable_testing()
 
 add_subdirectory(core)
 add_subdirectory(gateway)
+add_subdirectory(simulator)
 add_subdirectory(tests)

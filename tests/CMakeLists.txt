@@ -7,11 +7,13 @@ add_executable(edgeflow-tests
     test_worker_pool.cpp
     test_args.cpp
     test_gateway_config.cpp
+    test_simulator_config.cpp
 )
 
 target_link_libraries(edgeflow-tests PRIVATE
     edgeflow-core
     edgeflow-gateway-config
+    edgeflow-simulator-config
     GTest::gtest_main
     Threads::Threads
 )
