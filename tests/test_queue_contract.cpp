@@ -1,23 +1,40 @@
 #include <gtest/gtest.h>
 #include <atomic>
 #include <chrono>
+#include <optional>
+#include <stdexcept>
 #include <thread>
 #include <vector>
 #include "edgeflow/bounded_queue.hpp"
+#include "edgeflow/queue_concept.hpp"
 
 using edgeflow::BackpressurePolicy;
-using edgeflow::BoundedQueue;
 using edgeflow::PushResult;
 
-TEST(BoundedQueue, PushAcceptsUntilCapacity) {
-    BoundedQueue<int> queue(2, BackpressurePolicy::DropNewest);
+// Every implementation listed here must satisfy the whole contract below.
+// Task 2 appends LockFreeBoundedQueue<int> to this alias.
+using QueueTypes = ::testing::Types<edgeflow::BoundedQueue<int>>;
+
+template <typename Q>
+class QueueContractTest : public ::testing::Test {};
+
+TYPED_TEST_SUITE(QueueContractTest, QueueTypes);
+
+TYPED_TEST(QueueContractTest, SatisfiesEventQueueConcept) {
+    static_assert(edgeflow::EventQueue<TypeParam>,
+                  "queue implementation does not satisfy the EventQueue concept");
+    SUCCEED();
+}
+
+TYPED_TEST(QueueContractTest, PushAcceptsUntilCapacity) {
+    TypeParam queue(2, BackpressurePolicy::DropNewest);
     EXPECT_EQ(queue.push(1), PushResult::Accepted);
     EXPECT_EQ(queue.push(2), PushResult::Accepted);
     EXPECT_EQ(queue.size(), 2u);
 }
 
-TEST(BoundedQueue, DropNewestRejectsWhenFull) {
-    BoundedQueue<int> queue(1, BackpressurePolicy::DropNewest);
+TYPED_TEST(QueueContractTest, DropNewestRejectsWhenFull) {
+    TypeParam queue(1, BackpressurePolicy::DropNewest);
     EXPECT_EQ(queue.push(1), PushResult::Accepted);
     EXPECT_EQ(queue.push(2), PushResult::RejectedBackpressure);
     EXPECT_EQ(queue.size(), 1u);
@@ -27,8 +44,8 @@ TEST(BoundedQueue, DropNewestRejectsWhenFull) {
     EXPECT_EQ(*popped, 1);
 }
 
-TEST(BoundedQueue, DropOldestEvictsOldest) {
-    BoundedQueue<int> queue(2, BackpressurePolicy::DropOldest);
+TYPED_TEST(QueueContractTest, DropOldestEvictsOldest) {
+    TypeParam queue(2, BackpressurePolicy::DropOldest);
     EXPECT_EQ(queue.push(1), PushResult::Accepted);
     EXPECT_EQ(queue.push(2), PushResult::Accepted);
     EXPECT_EQ(queue.push(3), PushResult::DroppedOldest);
@@ -37,16 +54,16 @@ TEST(BoundedQueue, DropOldestEvictsOldest) {
     EXPECT_EQ(*queue.pop(), 3);
 }
 
-TEST(BoundedQueue, BlockPolicyRejectsWithoutEvicting) {
-    BoundedQueue<int> queue(1, BackpressurePolicy::Block);
+TYPED_TEST(QueueContractTest, BlockPolicyRejectsWithoutEvicting) {
+    TypeParam queue(1, BackpressurePolicy::Block);
     EXPECT_EQ(queue.push(1), PushResult::Accepted);
     EXPECT_EQ(queue.push(2), PushResult::RejectedBackpressure);
     EXPECT_EQ(queue.size(), 1u);
     EXPECT_EQ(*queue.pop(), 1);
 }
 
-TEST(BoundedQueue, ConcurrentPushPopPreservesAllAcceptedItems) {
-    BoundedQueue<int> queue(16, BackpressurePolicy::Block);
+TYPED_TEST(QueueContractTest, ConcurrentPushPopPreservesAllAcceptedItems) {
+    TypeParam queue(16, BackpressurePolicy::Block);
     constexpr int kProducers = 4;
     constexpr int kItemsPerProducer = 1000;
     std::atomic<int> accepted{0};
@@ -79,14 +96,14 @@ TEST(BoundedQueue, ConcurrentPushPopPreservesAllAcceptedItems) {
     EXPECT_EQ(consumed.load(), kProducers * kItemsPerProducer);
 }
 
-TEST(BoundedQueue, RejectsZeroCapacity) {
-    EXPECT_THROW((BoundedQueue<int>(0, BackpressurePolicy::Block)), std::invalid_argument);
-    EXPECT_THROW((BoundedQueue<int>(0, BackpressurePolicy::DropOldest)), std::invalid_argument);
-    EXPECT_THROW((BoundedQueue<int>(0, BackpressurePolicy::DropNewest)), std::invalid_argument);
+TYPED_TEST(QueueContractTest, RejectsZeroCapacity) {
+    EXPECT_THROW((TypeParam(0, BackpressurePolicy::Block)), std::invalid_argument);
+    EXPECT_THROW((TypeParam(0, BackpressurePolicy::DropOldest)), std::invalid_argument);
+    EXPECT_THROW((TypeParam(0, BackpressurePolicy::DropNewest)), std::invalid_argument);
 }
 
-TEST(BoundedQueue, ShutdownUnblocksWaitingPop) {
-    BoundedQueue<int> queue(4, BackpressurePolicy::Block);
+TYPED_TEST(QueueContractTest, ShutdownUnblocksWaitingPop) {
+    TypeParam queue(4, BackpressurePolicy::Block);
     std::optional<int> result = 42; // sentinel to prove it got overwritten
     std::thread popper([&] { result = queue.pop(); });
 
@@ -95,4 +112,19 @@ TEST(BoundedQueue, ShutdownUnblocksWaitingPop) {
     popper.join();
 
     EXPECT_FALSE(result.has_value());
+}
+
+TYPED_TEST(QueueContractTest, ShutdownDrainsRemainingItemsBeforeReturningNullopt) {
+    TypeParam queue(4, BackpressurePolicy::Block);
+    ASSERT_EQ(queue.push(1), PushResult::Accepted);
+    ASSERT_EQ(queue.push(2), PushResult::Accepted);
+
+    queue.shutdown();
+
+    // Contract: items already queued when shutdown() arrives are still
+    // delivered. WorkerPool's drain loop relies on this, so it is tested
+    // explicitly rather than assumed.
+    EXPECT_EQ(*queue.pop(), 1);
+    EXPECT_EQ(*queue.pop(), 2);
+    EXPECT_FALSE(queue.pop().has_value());
 }

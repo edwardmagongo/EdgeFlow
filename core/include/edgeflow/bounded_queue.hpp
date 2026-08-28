@@ -5,16 +5,18 @@
 #include <mutex>
 #include <optional>
 #include <stdexcept>
+#include "edgeflow/queue_types.hpp"
 
 namespace edgeflow {
 
-enum class BackpressurePolicy { Block, DropOldest, DropNewest };
-
-enum class PushResult { Accepted, DroppedOldest, RejectedBackpressure };
-
+// Fixed-capacity thread-safe queue: a std::deque guarded by one mutex, with a
+// condition variable for the blocking pop. This is the default production
+// queue; LockFreeBoundedQueue is the alternative measured against it.
 template <typename T>
 class BoundedQueue {
 public:
+    using value_type = T;
+
     BoundedQueue(std::size_t capacity, BackpressurePolicy policy)
         : capacity_(capacity), policy_(policy) {
         if (capacity == 0) {

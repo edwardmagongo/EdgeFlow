@@ -1,7 +1,7 @@
 add_executable(edgeflow-tests
     test_smoke.cpp
     test_event_parsing.cpp
-    test_bounded_queue.cpp
+    test_queue_contract.cpp
     test_batcher.cpp
     test_file_sink.cpp
     test_worker_pool.cpp
