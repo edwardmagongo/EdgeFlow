@@ -3,6 +3,7 @@ add_executable(edgeflow-tests
     test_event_parsing.cpp
     test_queue_contract.cpp
     test_lock_free_queue.cpp
+    test_queue_stress.cpp
     test_batcher.cpp
     test_file_sink.cpp
     test_worker_pool.cpp
