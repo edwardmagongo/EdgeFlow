@@ -1,5 +1,6 @@
 add_library(edgeflow-core
     src/event.cpp
+    src/batcher.cpp
 )
 
 target_include_directories(edgeflow-core PUBLIC include)
