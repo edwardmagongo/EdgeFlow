@@ -1,16 +1,25 @@
 #include <gtest/gtest.h>
 #include <chrono>
 #include "edgeflow/bounded_queue.hpp"
+#include "edgeflow/lock_free_bounded_queue.hpp"
 #include "edgeflow/timed_event.hpp"
 
 using edgeflow::BackpressurePolicy;
-using edgeflow::BoundedQueue;
 using edgeflow::Event;
 using edgeflow::PushResult;
 using edgeflow::TimedEvent;
 
-TEST(TimedEventQueue, RoundTripsEventAndTimestamp) {
-    BoundedQueue<TimedEvent> queue(4, BackpressurePolicy::Block);
+using TimedEventQueueTypes =
+    ::testing::Types<edgeflow::BoundedQueue<TimedEvent>,
+                     edgeflow::LockFreeBoundedQueue<TimedEvent>>;
+
+template <typename Q>
+class TimedEventQueueTest : public ::testing::Test {};
+
+TYPED_TEST_SUITE(TimedEventQueueTest, TimedEventQueueTypes);
+
+TYPED_TEST(TimedEventQueueTest, RoundTripsEventAndTimestamp) {
+    TypeParam queue(4, BackpressurePolicy::Block);
 
     Event event{42, "2026-08-28T00:00:00Z", 21.5, 90, 0.0, 0.0, "telemetry"};
     auto enqueued_at = std::chrono::steady_clock::now();
@@ -24,8 +33,8 @@ TEST(TimedEventQueue, RoundTripsEventAndTimestamp) {
     EXPECT_EQ(popped->enqueued_at, enqueued_at);
 }
 
-TEST(TimedEventQueue, PreservesOrderAndBackpressure) {
-    BoundedQueue<TimedEvent> queue(2, BackpressurePolicy::DropNewest);
+TYPED_TEST(TimedEventQueueTest, PreservesOrderAndBackpressure) {
+    TypeParam queue(2, BackpressurePolicy::DropNewest);
 
     Event event_a{1, "t", 1.0, 1, 0.0, 0.0, "telemetry"};
     Event event_b{2, "t", 2.0, 2, 0.0, 0.0, "telemetry"};
