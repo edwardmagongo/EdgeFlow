@@ -96,10 +96,6 @@ void DeviceClient::send_event() {
 }
 
 void DeviceClient::build_line_template() {
-    // A fixed-width placeholder of exactly the same shape a real timestamp has,
-    // so it can be overwritten in place. It cannot collide with any other value
-    // in the line.
-    static constexpr const char* kPlaceholder = "0000-00-00T00:00:00Z";
     edgeflow::Event event{
         device_id_,
         kPlaceholder,
@@ -111,14 +107,13 @@ void DeviceClient::build_line_template() {
     };
     line_ = edgeflow::serialize_event(event) + "\n";
     timestamp_offset_ = line_.find(kPlaceholder);
-    // Both of these are structural guarantees, not input validation: if either
-    // fails, the in-place splice below would corrupt every event this client
-    // sends, so fail loudly at construction instead.
+    // This is a structural guarantee, not input validation: if it fails, the
+    // in-place splice below would corrupt every event this client sends, so
+    // fail loudly at construction instead. (The placeholder's length matching
+    // kTimestampWidth is instead checked at compile time -- see the
+    // static_assert next to kPlaceholder's definition in the header.)
     if (timestamp_offset_ == std::string::npos) {
         throw std::logic_error("timestamp placeholder missing from serialised event");
-    }
-    if (std::strlen(kPlaceholder) != kTimestampWidth) {
-        throw std::logic_error("timestamp placeholder is not the expected width");
     }
 }
 

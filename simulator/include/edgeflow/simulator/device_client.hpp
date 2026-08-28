@@ -5,6 +5,7 @@
 #include <memory>
 #include <random>
 #include <string>
+#include <string_view>
 #include "edgeflow/iso_timestamp.hpp"
 
 namespace edgeflow::simulator {
@@ -67,6 +68,15 @@ private:
     std::size_t timestamp_offset_ = 0;
     // "2026-08-28T12:34:56Z" -- fixed width, so the splice is a memcpy.
     static constexpr std::size_t kTimestampWidth = 20;
+    // A fixed-width placeholder of exactly the same shape a real timestamp
+    // has, so it can be overwritten in place. It cannot collide with any
+    // other value in the line.
+    static constexpr const char* kPlaceholder = "0000-00-00T00:00:00Z";
+    // The placeholder's length vs. kTimestampWidth is fully determined at
+    // compile time, so check it here instead of at runtime on every device
+    // construction -- a build where this doesn't hold can't compile.
+    static_assert(std::string_view{kPlaceholder}.size() == kTimestampWidth,
+                  "placeholder length must match the fixed timestamp width");
 };
 
 } // namespace edgeflow::simulator

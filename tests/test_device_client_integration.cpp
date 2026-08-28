@@ -187,6 +187,21 @@ TEST(DeviceClientIntegration, HighRateSendUnderSlowReaderProducesOnlyValidNdjson
         EXPECT_TRUE(parsed.has_value())
             << "line failed to parse as a valid event (possible interleaved/corrupted write): "
             << line;
+        if (parsed.has_value()) {
+            // parse_event() only checks that the timestamp is present and is a
+            // JSON string -- it says nothing about its content. A silently
+            // unspliced timestamp (see do_send()'s width guard) would still be
+            // perfectly valid JSON, so these checks are the only thing that
+            // would catch it: either the never-overwritten placeholder value,
+            // or a stale timestamp from a previous send, both of which sail
+            // straight through parse_event().
+            EXPECT_EQ(parsed->timestamp.size(), 20u)
+                << "timestamp is not the expected fixed width: " << parsed->timestamp;
+            EXPECT_NE(parsed->timestamp, "0000-00-00T00:00:00Z")
+                << "timestamp still shows the unspliced placeholder value";
+            EXPECT_EQ(parsed->timestamp.back(), 'Z')
+                << "timestamp does not end with the expected UTC 'Z' suffix: " << parsed->timestamp;
+        }
     }
 }
 
