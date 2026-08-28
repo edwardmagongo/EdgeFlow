@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include <algorithm>
+#include <chrono>
 #include <cstddef>
 #include <thread>
 #include <vector>
@@ -27,16 +28,44 @@ namespace {
 // every one of its values exactly once. Producer p owns the block
 // [p * items_per_producer, (p + 1) * items_per_producer), so the union across
 // all producers is precisely 0 .. producers * items_per_producer - 1.
+//
+// When burst_size > 0, each producer pushes items in bursts of burst_size,
+// sleeping inter_burst_sleep between bursts. This is what actually exercises
+// LockFreeBoundedQueue's parking path: with producers pushing flat-out (the
+// burst_size == 0 default), the ring stays fed enough that consumers rarely
+// exhaust the bounded spin in pop() and essentially never park. A sleeping
+// producer lets consumers fully drain the queue and go idle, so the next
+// pop() call spins out and genuinely registers as a waiter and blocks on the
+// condition variable -- the exact code path this phase's fence protocol is
+// about. Consumers are unaffected by bursting; they still drain until
+// shutdown, so the exactness assertion applies unchanged.
 template <typename Queue>
-void run_exactness_stress(int producers, int consumers, int items_per_producer) {
+void run_exactness_stress(int producers, int consumers, int items_per_producer,
+                          int burst_size = 0,
+                          std::chrono::milliseconds inter_burst_sleep = std::chrono::milliseconds(0)) {
     Queue queue(64, BackpressurePolicy::Block);
 
     std::vector<std::thread> producer_threads;
     for (int p = 0; p < producers; ++p) {
-        producer_threads.emplace_back([&queue, p, items_per_producer] {
-            for (int i = 0; i < items_per_producer; ++i) {
-                while (queue.push(p * items_per_producer + i) != PushResult::Accepted) {
-                    std::this_thread::yield();
+        producer_threads.emplace_back([&queue, p, items_per_producer, burst_size, inter_burst_sleep] {
+            if (burst_size <= 0) {
+                for (int i = 0; i < items_per_producer; ++i) {
+                    while (queue.push(p * items_per_producer + i) != PushResult::Accepted) {
+                        std::this_thread::yield();
+                    }
+                }
+                return;
+            }
+            int i = 0;
+            while (i < items_per_producer) {
+                int burst_end = std::min(i + burst_size, items_per_producer);
+                for (; i < burst_end; ++i) {
+                    while (queue.push(p * items_per_producer + i) != PushResult::Accepted) {
+                        std::this_thread::yield();
+                    }
+                }
+                if (i < items_per_producer) {
+                    std::this_thread::sleep_for(inter_burst_sleep);
                 }
             }
         });
@@ -98,4 +127,21 @@ TYPED_TEST(QueueStressTest, ManyProducersManyConsumersLosesNothing) {
 
 TYPED_TEST(QueueStressTest, ManyProducersSingleConsumerLosesNothing) {
     run_exactness_stress<TypeParam>(4, 1, 2000);
+}
+
+// The three shapes above push as fast as possible, so the ring stays fed and
+// consumers rarely if ever exhaust their bounded spin -- meaning
+// LockFreeBoundedQueue's parking path (register as a waiter, block on the
+// condition variable, get woken by notify_one_waiter()'s fence-guarded
+// notify) goes essentially uncovered despite being the most correctness-
+// sensitive code this phase added. This shape closes that gap: producers
+// push a small burst, then sleep long enough that consumers fully drain the
+// queue and each blocked pop() spins out its budget and genuinely parks,
+// before the next burst arrives and wakes them back up. The exactness
+// assertion is identical to the other shapes -- bursting production timing
+// doesn't change what "correct" means, only how much idle time consumers get
+// between items.
+TYPED_TEST(QueueStressTest, BurstyProducersDrivesConsumerParkingLosesNothing) {
+    run_exactness_stress<TypeParam>(2, 4, 500, /*burst_size=*/24,
+                                    /*inter_burst_sleep=*/std::chrono::milliseconds(5));
 }
