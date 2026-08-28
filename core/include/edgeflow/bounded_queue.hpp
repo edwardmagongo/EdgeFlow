@@ -4,6 +4,7 @@
 #include <deque>
 #include <mutex>
 #include <optional>
+#include <stdexcept>
 
 namespace edgeflow {
 
@@ -15,7 +16,11 @@ template <typename T>
 class BoundedQueue {
 public:
     BoundedQueue(std::size_t capacity, BackpressurePolicy policy)
-        : capacity_(capacity), policy_(policy) {}
+        : capacity_(capacity), policy_(policy) {
+        if (capacity == 0) {
+            throw std::invalid_argument("capacity must be greater than 0");
+        }
+    }
 
     // Non-blocking. Applies the configured backpressure policy when full.
     PushResult push(T item) {

@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include <atomic>
+#include <chrono>
 #include <thread>
 #include <vector>
 #include "edgeflow/bounded_queue.hpp"
@@ -76,4 +77,22 @@ TEST(BoundedQueue, ConcurrentPushPopPreservesAllAcceptedItems) {
 
     EXPECT_EQ(accepted.load(), kProducers * kItemsPerProducer);
     EXPECT_EQ(consumed.load(), kProducers * kItemsPerProducer);
+}
+
+TEST(BoundedQueue, RejectsZeroCapacity) {
+    EXPECT_THROW((BoundedQueue<int>(0, BackpressurePolicy::Block)), std::invalid_argument);
+    EXPECT_THROW((BoundedQueue<int>(0, BackpressurePolicy::DropOldest)), std::invalid_argument);
+    EXPECT_THROW((BoundedQueue<int>(0, BackpressurePolicy::DropNewest)), std::invalid_argument);
+}
+
+TEST(BoundedQueue, ShutdownUnblocksWaitingPop) {
+    BoundedQueue<int> queue(4, BackpressurePolicy::Block);
+    std::optional<int> result = 42; // sentinel to prove it got overwritten
+    std::thread popper([&] { result = queue.pop(); });
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    queue.shutdown();
+    popper.join();
+
+    EXPECT_FALSE(result.has_value());
 }
