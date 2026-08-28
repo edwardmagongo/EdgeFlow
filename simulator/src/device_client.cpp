@@ -1,6 +1,8 @@
 #include "edgeflow/simulator/device_client.hpp"
 #include <algorithm>
+#include <cstring>
 #include <ctime>
+#include <stdexcept>
 #include "edgeflow/event.hpp"
 
 namespace edgeflow::simulator {
@@ -30,7 +32,9 @@ DeviceClient::DeviceClient(boost::asio::io_context& io_context,
           static_cast<long>(std::clamp(1000.0 / events_per_second, 1.0, 3'600'000.0)))),
       chaos_latency_(chaos_latency),
       chaos_packet_loss_percent_(chaos_packet_loss_percent),
-      chaos_rng_(static_cast<std::mt19937::result_type>(device_id)) {}
+      chaos_rng_(static_cast<std::mt19937::result_type>(device_id)) {
+    build_line_template();
+}
 
 void DeviceClient::start() { connect(); }
 
@@ -91,21 +95,42 @@ void DeviceClient::send_event() {
     });
 }
 
-void DeviceClient::do_send() {
+void DeviceClient::build_line_template() {
+    // A fixed-width placeholder of exactly the same shape a real timestamp has,
+    // so it can be overwritten in place. It cannot collide with any other value
+    // in the line.
+    static constexpr const char* kPlaceholder = "0000-00-00T00:00:00Z";
     edgeflow::Event event{
         device_id_,
-        timestamp_.now(),
+        kPlaceholder,
         20.0 + static_cast<double>(device_id_ % 15),
         static_cast<int>(100 - (device_id_ % 100)),
         37.7749,
         -122.4194,
         "telemetry",
     };
+    line_ = edgeflow::serialize_event(event) + "\n";
+    timestamp_offset_ = line_.find(kPlaceholder);
+    // Both of these are structural guarantees, not input validation: if either
+    // fails, the in-place splice below would corrupt every event this client
+    // sends, so fail loudly at construction instead.
+    if (timestamp_offset_ == std::string::npos) {
+        throw std::logic_error("timestamp placeholder missing from serialised event");
+    }
+    if (std::strlen(kPlaceholder) != kTimestampWidth) {
+        throw std::logic_error("timestamp placeholder is not the expected width");
+    }
+}
+
+void DeviceClient::do_send() {
+    const std::string& timestamp = timestamp_.now();
+    if (timestamp.size() == kTimestampWidth) {
+        std::memcpy(line_.data() + timestamp_offset_, timestamp.data(), kTimestampWidth);
+    }
     ++events_sent_;
-    auto line = std::make_shared<std::string>(edgeflow::serialize_event(event) + "\n");
     auto self = shared_from_this();
-    boost::asio::async_write(socket_, boost::asio::buffer(*line),
-        [this, self, line](const boost::system::error_code&, std::size_t) {
+    boost::asio::async_write(socket_, boost::asio::buffer(line_),
+        [this, self](const boost::system::error_code&, std::size_t) {
             write_in_flight_ = false;
         });
 }

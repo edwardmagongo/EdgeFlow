@@ -38,6 +38,7 @@ private:
     bool should_drop_for_chaos();
     void send_event();
     void do_send();
+    void build_line_template();
 
     boost::asio::ip::tcp::socket socket_;
     boost::asio::ip::tcp::resolver resolver_;
@@ -57,6 +58,15 @@ private:
     std::uniform_real_distribution<double> chaos_dist_{0.0, 100.0};
     bool stopped_ = false;
     bool write_in_flight_ = false;
+
+    // The device's serialised NDJSON line, built once. Only the 20-byte
+    // timestamp at timestamp_offset_ changes between sends. Written directly by
+    // async_write, which is safe because write_in_flight_ allows only one
+    // outstanding write per client.
+    std::string line_;
+    std::size_t timestamp_offset_ = 0;
+    // "2026-08-28T12:34:56Z" -- fixed width, so the splice is a memcpy.
+    static constexpr std::size_t kTimestampWidth = 20;
 };
 
 } // namespace edgeflow::simulator
