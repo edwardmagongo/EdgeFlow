@@ -17,7 +17,7 @@ int main(int argc, char** argv) {
     try {
         boost::asio::io_context io_context;
         std::vector<std::shared_ptr<edgeflow::simulator::DeviceClient>> clients;
-        clients.reserve(config.device_count);
+        clients.reserve(config.device_count + config.chaos_device_spike_count);
 
         for (std::size_t i = 0; i < config.device_count; ++i) {
             auto client = std::make_shared<edgeflow::simulator::DeviceClient>(
@@ -26,6 +26,25 @@ int main(int argc, char** argv) {
                 config.chaos_packet_loss_percent);
             clients.push_back(client);
             client->start();
+        }
+
+        boost::asio::steady_timer spike_timer(io_context);
+        if (config.chaos_device_spike_count > 0) {
+            spike_timer.expires_after(std::chrono::seconds(config.chaos_device_spike_at_sec));
+            spike_timer.async_wait([&](const boost::system::error_code& error) {
+                if (error) return;
+                std::cout << "edgeflow-simulator: chaos device-spike -- adding "
+                          << config.chaos_device_spike_count << " devices\n";
+                for (std::size_t i = 0; i < config.chaos_device_spike_count; ++i) {
+                    auto spike_id = static_cast<std::int64_t>(config.device_count + i);
+                    auto client = std::make_shared<edgeflow::simulator::DeviceClient>(
+                        io_context, config.host, config.port, spike_id,
+                        config.events_per_second_per_device, config.chaos_latency,
+                        config.chaos_packet_loss_percent);
+                    clients.push_back(client);
+                    client->start();
+                }
+            });
         }
 
         boost::asio::steady_timer stop_timer(io_context);
@@ -42,7 +61,7 @@ int main(int argc, char** argv) {
                   << config.duration_seconds << "s\n";
 
         io_context.run();
-        std::cout << "edgeflow-simulator: done\n";
+        std::cout << "edgeflow-simulator: done (" << clients.size() << " total devices)\n";
     } catch (const std::exception& e) {
         std::cerr << "edgeflow-simulator: " << e.what() << '\n';
         return 1;
