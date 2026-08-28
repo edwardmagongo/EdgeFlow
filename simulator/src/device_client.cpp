@@ -1,25 +1,11 @@
 #include "edgeflow/simulator/device_client.hpp"
 #include <algorithm>
 #include <ctime>
-#include <iomanip>
-#include <sstream>
 #include "edgeflow/event.hpp"
 
 namespace edgeflow::simulator {
 
 using boost::asio::ip::tcp;
-
-namespace {
-std::string iso_timestamp_now() {
-    auto now = std::chrono::system_clock::now();
-    auto time = std::chrono::system_clock::to_time_t(now);
-    std::tm utc_tm{};
-    gmtime_r(&time, &utc_tm);
-    std::ostringstream out;
-    out << std::put_time(&utc_tm, "%Y-%m-%dT%H:%M:%SZ");
-    return out.str();
-}
-} // namespace
 
 DeviceClient::DeviceClient(boost::asio::io_context& io_context,
                             const std::string& host,
@@ -108,7 +94,7 @@ void DeviceClient::send_event() {
 void DeviceClient::do_send() {
     edgeflow::Event event{
         device_id_,
-        iso_timestamp_now(),
+        timestamp_.now(),
         20.0 + static_cast<double>(device_id_ % 15),
         static_cast<int>(100 - (device_id_ % 100)),
         37.7749,

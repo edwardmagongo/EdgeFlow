@@ -5,6 +5,7 @@
 #include <memory>
 #include <random>
 #include <string>
+#include "edgeflow/iso_timestamp.hpp"
 
 namespace edgeflow::simulator {
 
@@ -44,6 +45,9 @@ private:
     std::chrono::milliseconds send_interval_;
     std::chrono::milliseconds chaos_latency_;
     double chaos_packet_loss_percent_;
+    // One per client. DeviceClient is not shared across io_context threads, so
+    // this needs no synchronisation.
+    edgeflow::CachedIsoTimestamp timestamp_;
     std::mt19937 chaos_rng_;
     std::uniform_real_distribution<double> chaos_dist_{0.0, 100.0};
     bool stopped_ = false;
