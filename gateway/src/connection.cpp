@@ -7,7 +7,7 @@ namespace edgeflow::gateway {
 using boost::asio::ip::tcp;
 
 Connection::Connection(tcp::socket socket,
-                        edgeflow::BoundedQueue<edgeflow::Event>& queue,
+                        edgeflow::BoundedQueue<edgeflow::TimedEvent>& queue,
                         edgeflow::BackpressurePolicy policy,
                         edgeflow::Stats& stats)
     : socket_(std::move(socket)),
@@ -43,7 +43,7 @@ void Connection::handle_line(const std::string& line) {
 }
 
 void Connection::push_event(edgeflow::Event event) {
-    auto result = queue_.push(event);
+    auto result = queue_.push(edgeflow::TimedEvent{event, std::chrono::steady_clock::now()});
     if (result == edgeflow::PushResult::Accepted) {
         stats_.record_accepted();
         read_line();
@@ -69,13 +69,13 @@ void Connection::push_event(edgeflow::Event event) {
 void Connection::retry_push(edgeflow::Event event) {
     auto self = shared_from_this();
     retry_timer_.expires_after(std::chrono::milliseconds(5));
-    retry_timer_.async_wait([this, self, event = std::move(event)](const boost::system::error_code& error) mutable {
+    retry_timer_.async_wait([this, self, event](const boost::system::error_code& error) {
         if (error) {
             return;
         }
-        auto result = queue_.push(event);
+        auto result = queue_.push(edgeflow::TimedEvent{event, std::chrono::steady_clock::now()});
         if (result == edgeflow::PushResult::RejectedBackpressure) {
-            retry_push(std::move(event));
+            retry_push(event);
             return;
         }
         if (result == edgeflow::PushResult::Accepted) {

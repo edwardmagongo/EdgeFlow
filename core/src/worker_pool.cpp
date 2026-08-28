@@ -2,8 +2,9 @@
 
 namespace edgeflow {
 
-WorkerPool::WorkerPool(BoundedQueue<Event>& queue, Batcher& batcher, std::size_t num_workers)
-    : queue_(queue), batcher_(batcher), num_workers_(num_workers) {}
+WorkerPool::WorkerPool(BoundedQueue<TimedEvent>& queue, Batcher& batcher, Stats& stats,
+                        std::size_t num_workers)
+    : queue_(queue), batcher_(batcher), stats_(stats), num_workers_(num_workers) {}
 
 WorkerPool::~WorkerPool() { stop(); }
 
@@ -28,8 +29,9 @@ void WorkerPool::stop() {
 }
 
 void WorkerPool::worker_loop() {
-    while (auto event = queue_.pop()) {
-        batcher_.add_event(std::move(*event));
+    while (auto timed = queue_.pop()) {
+        stats_.record_queue_wait(std::chrono::steady_clock::now() - timed->enqueued_at);
+        batcher_.add_event(std::move(timed->event));
     }
 }
 

@@ -9,6 +9,7 @@
 #include "edgeflow/gateway/config.hpp"
 #include "edgeflow/gateway/server.hpp"
 #include "edgeflow/stats.hpp"
+#include "edgeflow/timed_event.hpp"
 #include "edgeflow/worker_pool.hpp"
 
 int main(int argc, char** argv) {
@@ -21,12 +22,12 @@ int main(int argc, char** argv) {
     }
 
     try {
-        edgeflow::BoundedQueue<edgeflow::Event> queue(config.queue_capacity, config.backpressure);
+        edgeflow::BoundedQueue<edgeflow::TimedEvent> queue(config.queue_capacity, config.backpressure);
         edgeflow::FileSink sink(config.sink_file);
         edgeflow::Batcher batcher(config.batch_size, config.batch_age,
                                     [&sink](std::vector<edgeflow::Event> batch) { sink.consume(batch); });
-        edgeflow::WorkerPool pool(queue, batcher, config.workers);
         edgeflow::Stats stats;
+        edgeflow::WorkerPool pool(queue, batcher, stats, config.workers);
 
         boost::asio::io_context io_context;
 

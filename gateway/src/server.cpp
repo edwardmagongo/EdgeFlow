@@ -8,7 +8,7 @@ using boost::asio::ip::tcp;
 
 Server::Server(boost::asio::io_context& io_context,
                std::uint16_t port,
-               edgeflow::BoundedQueue<edgeflow::Event>& queue,
+               edgeflow::BoundedQueue<edgeflow::TimedEvent>& queue,
                edgeflow::BackpressurePolicy policy,
                edgeflow::Stats& stats)
     : acceptor_(io_context, tcp::endpoint(tcp::v4(), port)),

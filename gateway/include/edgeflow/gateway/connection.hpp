@@ -1,10 +1,12 @@
 #pragma once
 #include <boost/asio.hpp>
+#include <chrono>
 #include <memory>
 #include <string>
 #include "edgeflow/bounded_queue.hpp"
 #include "edgeflow/event.hpp"
 #include "edgeflow/stats.hpp"
+#include "edgeflow/timed_event.hpp"
 
 namespace edgeflow::gateway {
 
@@ -18,7 +20,7 @@ namespace edgeflow::gateway {
 class Connection : public std::enable_shared_from_this<Connection> {
 public:
     Connection(boost::asio::ip::tcp::socket socket,
-               edgeflow::BoundedQueue<edgeflow::Event>& queue,
+               edgeflow::BoundedQueue<edgeflow::TimedEvent>& queue,
                edgeflow::BackpressurePolicy policy,
                edgeflow::Stats& stats);
 
@@ -34,7 +36,7 @@ private:
     // Capped at 1 MB so a client that never sends a newline can't grow this
     // buffer unboundedly and exhaust memory.
     boost::asio::streambuf buffer_{1 << 20};
-    edgeflow::BoundedQueue<edgeflow::Event>& queue_;
+    edgeflow::BoundedQueue<edgeflow::TimedEvent>& queue_;
     edgeflow::BackpressurePolicy policy_;
     edgeflow::Stats& stats_;
     boost::asio::steady_timer retry_timer_;
