@@ -5,9 +5,16 @@ add_executable(edgeflow-tests
     test_batcher.cpp
     test_file_sink.cpp
     test_worker_pool.cpp
+    test_args.cpp
+    test_gateway_config.cpp
 )
 
-target_link_libraries(edgeflow-tests PRIVATE edgeflow-core GTest::gtest_main Threads::Threads)
+target_link_libraries(edgeflow-tests PRIVATE
+    edgeflow-core
+    edgeflow-gateway-config
+    GTest::gtest_main
+    Threads::Threads
+)
 
 include(GoogleTest)
 gtest_discover_tests(edgeflow-tests)
