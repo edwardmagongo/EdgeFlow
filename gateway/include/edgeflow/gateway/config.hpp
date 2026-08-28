@@ -2,7 +2,7 @@
 #include <chrono>
 #include <cstdint>
 #include <string>
-#include "edgeflow/bounded_queue.hpp"
+#include "edgeflow/queue_types.hpp"
 
 namespace edgeflow::gateway {
 

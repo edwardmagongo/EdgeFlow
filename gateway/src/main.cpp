@@ -4,13 +4,27 @@
 #include <mutex>
 #include <thread>
 #include "edgeflow/batcher.hpp"
-#include "edgeflow/bounded_queue.hpp"
 #include "edgeflow/file_sink.hpp"
 #include "edgeflow/gateway/config.hpp"
 #include "edgeflow/gateway/server.hpp"
 #include "edgeflow/stats.hpp"
 #include "edgeflow/timed_event.hpp"
 #include "edgeflow/worker_pool.hpp"
+
+// Which queue this binary uses is fixed at compile time: edgeflow-gateway builds
+// with the mutex queue, edgeflow-gateway-lockfree with EDGEFLOW_USE_LOCK_FREE_QUEUE
+// defined. Compile-time rather than a runtime virtual interface, because a virtual
+// call on the push path (~2-5ns against a ~19-30ns push) would distort the exact
+// quantity these two binaries exist to compare.
+#if defined(EDGEFLOW_USE_LOCK_FREE_QUEUE)
+#include "edgeflow/lock_free_bounded_queue.hpp"
+using GatewayQueue = edgeflow::LockFreeBoundedQueue<edgeflow::TimedEvent>;
+inline constexpr const char* kQueueName = "lock-free";
+#else
+#include "edgeflow/bounded_queue.hpp"
+using GatewayQueue = edgeflow::BoundedQueue<edgeflow::TimedEvent>;
+inline constexpr const char* kQueueName = "mutex";
+#endif
 
 int main(int argc, char** argv) {
     edgeflow::gateway::Config config;
@@ -22,7 +36,7 @@ int main(int argc, char** argv) {
     }
 
     try {
-        edgeflow::BoundedQueue<edgeflow::TimedEvent> queue(config.queue_capacity, config.backpressure);
+        GatewayQueue queue(config.queue_capacity, config.backpressure);
         edgeflow::FileSink sink(config.sink_file);
         edgeflow::Batcher batcher(config.batch_size, config.batch_age,
                                     [&sink](std::vector<edgeflow::Event> batch) { sink.consume(batch); });
@@ -77,9 +91,14 @@ int main(int argc, char** argv) {
             }
         });
 
+        // queue.capacity() rather than config.queue_capacity: the lock-free queue
+        // rounds up to a power of two with a floor of 2, so the requested and actual
+        // capacities can differ. A benchmark comparison has to report what the queue
+        // actually holds, not what was asked for.
         std::cout << "edgeflow-gateway listening on port " << config.port
-                  << " (workers=" << config.workers
-                  << ", queue_capacity=" << config.queue_capacity << ")\n";
+                  << " (queue=" << kQueueName
+                  << ", workers=" << config.workers
+                  << ", queue_capacity=" << queue.capacity() << ")\n";
 
         io_context.run();
 
