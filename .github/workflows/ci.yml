@@ -27,4 +27,6 @@ jobs:
         run: ctest --test-dir build --output-on-failure
 
       - name: Smoke-test benchmarks
-        run: ./build/benchmarks/edgeflow-benchmarks --benchmark_min_time=1x --benchmark_filter=BM_BoundedQueue_SingleThreaded
+        # Covers both queue implementations and the new SPMC fixture. The filter is
+        # a regex, so this matches every template instantiation of both names.
+        run: ./build/benchmarks/edgeflow-benchmarks --benchmark_min_time=1x --benchmark_filter='BM_Queue_SingleThreaded|BM_Queue_SPMC_Push'
