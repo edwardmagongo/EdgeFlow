@@ -96,7 +96,11 @@ int main(int argc, char** argv) {
         std::cout << "edgeflow-gateway shut down (accepted=" << snapshot.events_accepted
                   << ", dropped_oldest=" << snapshot.events_dropped_oldest
                   << ", dropped_newest=" << snapshot.events_dropped_newest
-                  << ", malformed=" << snapshot.events_malformed << ")\n";
+                  << ", malformed=" << snapshot.events_malformed
+                  << ", queue_wait_count=" << snapshot.queue_wait_count
+                  << ", queue_wait_mean_us=" << snapshot.queue_wait_mean_us
+                  << ", queue_wait_p50_us=" << snapshot.queue_wait_p50_us
+                  << ", queue_wait_p99_us=" << snapshot.queue_wait_p99_us << ")\n";
         return 0;
     } catch (const std::exception& e) {
         std::cerr << "edgeflow-gateway: " << e.what() << '\n';

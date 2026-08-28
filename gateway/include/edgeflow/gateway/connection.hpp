@@ -1,10 +1,8 @@
 #pragma once
 #include <boost/asio.hpp>
-#include <chrono>
 #include <memory>
 #include <string>
 #include "edgeflow/bounded_queue.hpp"
-#include "edgeflow/event.hpp"
 #include "edgeflow/stats.hpp"
 #include "edgeflow/timed_event.hpp"
 
@@ -29,8 +27,8 @@ public:
 private:
     void read_line();
     void handle_line(const std::string& line);
-    void push_event(edgeflow::Event event);
-    void retry_push(edgeflow::Event event);
+    void push_event(edgeflow::TimedEvent timed);
+    void retry_push(edgeflow::TimedEvent timed);
 
     boost::asio::ip::tcp::socket socket_;
     // Capped at 1 MB so a client that never sends a newline can't grow this

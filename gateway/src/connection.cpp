@@ -1,4 +1,5 @@
 #include "edgeflow/gateway/connection.hpp"
+#include <chrono>
 #include <istream>
 #include <utility>
 
@@ -39,11 +40,11 @@ void Connection::handle_line(const std::string& line) {
         read_line();
         return;
     }
-    push_event(std::move(*event));
+    push_event(edgeflow::TimedEvent{std::move(*event), std::chrono::steady_clock::now()});
 }
 
-void Connection::push_event(edgeflow::Event event) {
-    auto result = queue_.push(edgeflow::TimedEvent{event, std::chrono::steady_clock::now()});
+void Connection::push_event(edgeflow::TimedEvent timed) {
+    auto result = queue_.push(timed);
     if (result == edgeflow::PushResult::Accepted) {
         stats_.record_accepted();
         read_line();
@@ -62,20 +63,22 @@ void Connection::push_event(edgeflow::Event event) {
         return;
     }
 
-    // Block policy: pause reading, retry the push shortly.
-    retry_push(std::move(event));
+    // Block policy: pause reading, retry the push shortly. The original
+    // enqueued_at timestamp travels with `timed` across retries, so queue-wait
+    // latency measures total time including any backpressure delay.
+    retry_push(std::move(timed));
 }
 
-void Connection::retry_push(edgeflow::Event event) {
+void Connection::retry_push(edgeflow::TimedEvent timed) {
     auto self = shared_from_this();
     retry_timer_.expires_after(std::chrono::milliseconds(5));
-    retry_timer_.async_wait([this, self, event](const boost::system::error_code& error) {
+    retry_timer_.async_wait([this, self, timed = std::move(timed)](const boost::system::error_code& error) mutable {
         if (error) {
             return;
         }
-        auto result = queue_.push(edgeflow::TimedEvent{event, std::chrono::steady_clock::now()});
+        auto result = queue_.push(timed);
         if (result == edgeflow::PushResult::RejectedBackpressure) {
-            retry_push(event);
+            retry_push(std::move(timed));
             return;
         }
         if (result == edgeflow::PushResult::Accepted) {

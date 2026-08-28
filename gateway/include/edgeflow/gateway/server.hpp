@@ -1,7 +1,6 @@
 #pragma once
 #include <boost/asio.hpp>
 #include "edgeflow/bounded_queue.hpp"
-#include "edgeflow/event.hpp"
 #include "edgeflow/stats.hpp"
 #include "edgeflow/timed_event.hpp"
 
