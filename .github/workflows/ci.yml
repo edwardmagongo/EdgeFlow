@@ -25,3 +25,6 @@ jobs:
 
       - name: Test
         run: ctest --test-dir build --output-on-failure
+
+      - name: Smoke-test benchmarks
+        run: ./build/benchmarks/edgeflow-benchmarks --benchmark_min_time=1x --benchmark_filter=BM_BoundedQueue_SingleThreaded
