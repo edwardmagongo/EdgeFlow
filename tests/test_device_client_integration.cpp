@@ -190,6 +190,69 @@ TEST(DeviceClientIntegration, HighRateSendUnderSlowReaderProducesOnlyValidNdjson
     }
 }
 
+TEST(DeviceClientIntegration, PacketLossHundredPercentSendsNoLines) {
+    boost::asio::io_context io_context;
+    RawLineCollector collector(io_context);
+    collector.start_accept();
+
+    auto client = std::make_shared<edgeflow::simulator::DeviceClient>(
+        io_context, "127.0.0.1", collector.port(), /*device_id=*/1,
+        /*events_per_second=*/20.0, /*chaos_latency=*/std::chrono::milliseconds(0),
+        /*chaos_packet_loss_percent=*/100.0);
+    client->start();
+
+    std::thread io_thread([&io_context] { io_context.run(); });
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    boost::asio::post(io_context, [client] { client->stop(); });
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    io_context.stop();
+    io_thread.join();
+
+    EXPECT_TRUE(collector.lines().empty())
+        << "expected zero events with --chaos-packet-loss-percent=100, got "
+        << collector.lines().size();
+}
+
+TEST(DeviceClientIntegration, ChaosLatencyDelaysFirstSend) {
+    boost::asio::io_context io_context;
+    RawLineCollector collector(io_context);
+    collector.start_accept();
+
+    constexpr auto kChaosLatency = std::chrono::milliseconds(300);
+    auto client = std::make_shared<edgeflow::simulator::DeviceClient>(
+        io_context, "127.0.0.1", collector.port(), /*device_id=*/1,
+        /*events_per_second=*/1000.0, kChaosLatency,
+        /*chaos_packet_loss_percent=*/0.0);
+
+    auto start = std::chrono::steady_clock::now();
+    client->start();
+
+    std::thread io_thread([&io_context] { io_context.run(); });
+
+    // Poll for the first line to arrive rather than sleeping a fixed amount,
+    // so this test isn't tied to guessing exactly how long the collector's
+    // own throttled reads take on top of the injected chaos latency.
+    std::chrono::steady_clock::time_point first_line_at{};
+    for (int i = 0; i < 100; ++i) {
+        if (!collector.lines().empty()) {
+            first_line_at = std::chrono::steady_clock::now();
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+
+    boost::asio::post(io_context, [client] { client->stop(); });
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    io_context.stop();
+    io_thread.join();
+
+    ASSERT_NE(first_line_at.time_since_epoch().count(), 0)
+        << "no event arrived within the polling window";
+    auto elapsed = first_line_at - start;
+    EXPECT_GE(elapsed, kChaosLatency)
+        << "first event arrived faster than the configured chaos latency";
+}
+
 // --- Validation notes (Fix B, final whole-branch-review fix round) ---------
 //
 // Per review requirement, the write_in_flight_ guard in

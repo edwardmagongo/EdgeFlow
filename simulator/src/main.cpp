@@ -22,7 +22,8 @@ int main(int argc, char** argv) {
         for (std::size_t i = 0; i < config.device_count; ++i) {
             auto client = std::make_shared<edgeflow::simulator::DeviceClient>(
                 io_context, config.host, config.port, static_cast<std::int64_t>(i),
-                config.events_per_second_per_device);
+                config.events_per_second_per_device, config.chaos_latency,
+                config.chaos_packet_loss_percent);
             clients.push_back(client);
             client->start();
         }
