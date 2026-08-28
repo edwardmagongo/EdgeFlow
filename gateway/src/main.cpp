@@ -1,6 +1,8 @@
 #include <boost/asio.hpp>
-#include <functional>
+#include <condition_variable>
 #include <iostream>
+#include <mutex>
+#include <thread>
 #include "edgeflow/batcher.hpp"
 #include "edgeflow/bounded_queue.hpp"
 #include "edgeflow/file_sink.hpp"
@@ -40,29 +42,52 @@ int main(int argc, char** argv) {
 
         edgeflow::gateway::Server server(io_context, config.port, queue, config.backpressure, stats);
 
-        // Periodic flush timer: Batcher only checks its age threshold inside
+        // Periodic flush thread: Batcher only checks its age threshold inside
         // add_event(), so without this an idle gateway (no new events arriving)
-        // could leave a partial batch unflushed indefinitely. This timer runs
-        // independently of event arrivals to keep --batch-age-ms an actual
-        // latency bound, supplementing (not replacing) the in-add_event checks.
-        boost::asio::steady_timer flush_timer(io_context);
-        std::function<void()> arm_flush_timer = [&]() {
-            flush_timer.expires_after(config.batch_age);
-            flush_timer.async_wait([&](const boost::system::error_code& error) {
-                if (error) {
-                    return; // timer canceled (shutdown); do not re-arm.
+        // could leave a partial batch unflushed indefinitely. This runs on a
+        // dedicated thread -- NOT on the io_context -- because Batcher::flush()
+        // does blocking disk I/O (via FileSink) and takes Batcher's mutex; doing
+        // that from an io_context handler would block the single network I/O
+        // thread that also services accepts, reads, and backpressure-retry
+        // timers, which is exactly the blocking-on-the-reactor-thread problem
+        // the Block backpressure policy's non-blocking retry timers exist to
+        // avoid. The thread wakes on its own schedule (independent of event
+        // arrivals) to keep --batch-age-ms an actual latency bound,
+        // supplementing (not replacing) the in-add_event checks.
+        std::mutex flush_shutdown_mutex;
+        std::condition_variable flush_shutdown_cv;
+        bool flush_shutdown = false;
+        std::thread flush_thread([&]() {
+            std::unique_lock<std::mutex> lock(flush_shutdown_mutex);
+            while (!flush_shutdown) {
+                if (flush_shutdown_cv.wait_for(lock, config.batch_age,
+                                                [&] { return flush_shutdown; })) {
+                    // Woken by the shutdown notification: exit without flushing.
+                    // The post-io_context.run() shutdown sequence below already
+                    // performs the final flush.
+                    break;
                 }
+                // Timed out with no shutdown signaled: do the periodic flush.
+                // Batcher::flush() takes its own internal mutex, so it must not
+                // be called while still holding flush_shutdown_mutex.
+                lock.unlock();
                 batcher.flush();
-                arm_flush_timer();
-            });
-        };
-        arm_flush_timer();
+                lock.lock();
+            }
+        });
 
         std::cout << "edgeflow-gateway listening on port " << config.port
                   << " (workers=" << config.workers
                   << ", queue_capacity=" << config.queue_capacity << ")\n";
 
         io_context.run();
+
+        {
+            std::lock_guard<std::mutex> lock(flush_shutdown_mutex);
+            flush_shutdown = true;
+        }
+        flush_shutdown_cv.notify_one();
+        flush_thread.join();
 
         pool.stop();
         batcher.flush();

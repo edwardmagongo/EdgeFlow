@@ -49,3 +49,8 @@ Inspect the output:
 
     wc -l /tmp/edgeflow_events.ndjson
     head -n 3 /tmp/edgeflow_events.ndjson
+
+On shutdown (SIGINT/SIGTERM), the gateway prints its observability counters:
+accepted, dropped_oldest, dropped_newest, and malformed event counts, e.g.
+
+    edgeflow-gateway shut down (accepted=15000, dropped_oldest=0, dropped_newest=0, malformed=0)

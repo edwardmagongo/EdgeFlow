@@ -17,6 +17,8 @@ target_link_libraries(edgeflow-tests PRIVATE
     edgeflow-gateway-lib
     edgeflow-simulator-lib
     GTest::gtest_main
+    # Boost is linked here (reversing the earlier gateway/simulator separation)
+    # because test_device_client_integration.cpp needs real Boost.Asio networking.
     Boost::system
     Threads::Threads
 )

@@ -31,9 +31,12 @@ TEST(EventParsing, RejectsMissingFields) {
 }
 
 TEST(EventParsing, RejectsNonFiniteTemperature) {
-    // 1e400 overflows double range during nlohmann::json's numeric parse,
-    // producing +inf without throwing a parse_error -- this is the exact
-    // network-reachable path that used to slip an inf through to the sink.
+    // 1e400 is rejected during JSON parsing itself: nlohmann::json (v3.11.3)
+    // throws out_of_range while parsing a numeric literal that overflows
+    // double range, rather than silently producing +inf. This is why
+    // parse_event's catch clause has to catch more than just parse_error --
+    // this is the exact network-reachable path that used to slip an inf
+    // through to the sink before that catch clause was broadened.
     const std::string line =
         R"({"device_id":1,"timestamp":"2026-08-28T00:00:00Z","temperature":1e400,)"
         R"("battery":100,"latitude":0.0,"longitude":0.0,"event_type":"telemetry"})";
