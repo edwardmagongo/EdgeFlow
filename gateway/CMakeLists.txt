@@ -1,7 +1,5 @@
 add_library(edgeflow-gateway-lib
     src/config.cpp
-    src/connection.cpp
-    src/server.cpp
 )
 target_include_directories(edgeflow-gateway-lib PUBLIC include)
 target_link_libraries(edgeflow-gateway-lib PUBLIC
