@@ -1,4 +1,4 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 import { Pool } from 'pg';
 import { EventRow } from '../ingest/ndjson.parser';
 import { PG_POOL } from './pool';
@@ -19,6 +19,8 @@ function chunk<T>(items: T[], size: number): T[][] {
 
 @Injectable()
 export class EventsRepository {
+  private readonly logger = new Logger('EventsRepository');
+
   constructor(@Inject(PG_POOL) private readonly pool: Pool) {}
 
   // Writes every row, or none. Throws on database failure; the caller maps that
@@ -27,6 +29,23 @@ export class EventsRepository {
     if (rows.length === 0) return 0;
 
     const client = await this.pool.connect();
+
+    // A CHECKED-OUT client emits 'error' on itself, not on the pool: while a
+    // client is lent out, pg removes the pool's own listener from it. So the
+    // pool-level handler in pool.ts does NOT cover this window. If Postgres
+    // terminates the connection mid-transaction -- `docker compose stop
+    // postgres` produces exactly this, error 57P01 -- the Client emits 'error'
+    // with no listener attached, which Node escalates to an uncaught exception
+    // and the whole process dies. The in-flight query rejects separately and is
+    // handled below; this listener only exists so the asynchronous socket-level
+    // error cannot take the service down with it.
+    let connectionFailed = false;
+    const onClientError = (error: Error): void => {
+      connectionFailed = true;
+      this.logger.error(`connection lost mid-transaction: ${error.message}`);
+    };
+    client.on('error', onClientError);
+
     try {
       await client.query('BEGIN');
       for (const group of chunk(rows, MAX_ROWS_PER_STATEMENT)) {
@@ -40,7 +59,10 @@ export class EventsRepository {
       await client.query('ROLLBACK').catch(() => undefined);
       throw error;
     } finally {
-      client.release();
+      client.off('error', onClientError);
+      // A client whose connection broke must be destroyed rather than returned
+      // to the pool, or the pool hands the dead socket to the next caller.
+      client.release(connectionFailed ? true : undefined);
     }
   }
 
