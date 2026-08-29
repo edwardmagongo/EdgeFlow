@@ -135,36 +135,52 @@ describe('EventsRepository.queryEvents', () => {
   // placeholder numbers must stay correct when all three are present at once.
   // A wrong index here would either bind the wrong value to the wrong
   // placeholder (silently returning a different -- often empty -- result) or
-  // throw. The expected result below is a specific, non-empty, non-trivial
-  // set: it only comes out right if `from`, `to`, and the cursor's timestamp
-  // and id are each bound to their own intended placeholder.
+  // throw.
+  //
+  // In `desc` order both `to` and the cursor create *upper* bounds on
+  // timestamp, so `to` only has an independently observable effect when it is
+  // *more restrictive* than the cursor bound (i.e. `to` < cursor.timestamp).
+  // Here `to` is 10:02 and the cursor is 10:04, so the cursor bound alone
+  // (`timestamp < 10:04`) would let 10:03 through, but `to <= 10:02` excludes
+  // it. If the `to` condition were silently dropped from the WHERE clause
+  // (e.g. its value still pushed onto `values` but the corresponding
+  // `conditions.push` omitted, shifting nothing but doing nothing), this test
+  // would incorrectly include 10:03 in the result and fail -- which is the
+  // discriminating power this test is meant to have.
   it('applies from, to, and cursor together correctly', async () => {
     await repository.insertEvents([
       row(1, '2026-08-29T09:00:00Z'), // before `from` -- excluded by from
-      row(1, '2026-08-29T10:00:00Z'), // in range, older than cursor -- included
-      row(1, '2026-08-29T10:01:00Z'), // in range, older than cursor -- included
-      row(1, '2026-08-29T10:02:00Z'), // this row IS the cursor -- excluded (exclusive bound)
-      row(1, '2026-08-29T10:03:00Z'), // in range, newer than cursor -- excluded by cursor
-      row(1, '2026-08-29T10:05:00Z'), // after `to` -- excluded by to
+      row(1, '2026-08-29T10:00:00Z'), // in range, older than cursor, within to -- included
+      row(1, '2026-08-29T10:01:00Z'), // in range, older than cursor, within to -- included
+      row(1, '2026-08-29T10:02:00Z'), // in range, older than cursor, AT the `to` bound -- included
+      row(1, '2026-08-29T10:03:00Z'), // older than cursor but PAST `to` -- excluded by to, NOT by cursor
+      row(1, '2026-08-29T10:04:00Z'), // this row IS the cursor -- excluded (exclusive bound)
+      row(1, '2026-08-29T10:05:00Z'), // newer than cursor -- excluded by cursor
     ]);
 
     const all = await repository.queryEvents(baseParams({ deviceId: 1, order: 'asc', limit: 100 }));
-    const cursorRow = all.find((r) => r.timestamp.toISOString() === '2026-08-29T10:02:00.000Z')!;
+    const cursorRow = all.find((r) => r.timestamp.toISOString() === '2026-08-29T10:04:00.000Z')!;
 
     const rows = await repository.queryEvents(
       baseParams({
         deviceId: 1,
         order: 'desc',
         from: new Date('2026-08-29T09:30:00Z'),
-        to: new Date('2026-08-29T10:04:00Z'),
+        to: new Date('2026-08-29T10:02:00Z'),
         cursor: { timestamp: cursorRow.timestamp.toISOString(), id: cursorRow.id },
       }),
     );
 
-    // desc order returns newest-first among rows strictly older than the
-    // cursor and within [from, to]: 10:01 then 10:00. If any placeholder were
-    // mis-numbered, this would instead be empty, wrong, or throw.
+    // The cursor bound alone (timestamp < 10:04) would pass
+    // 10:03, 10:02, 10:01, 10:00, 09:00. `to <= 10:02` additionally excludes
+    // 10:03 -- a row the cursor bound alone would NOT have excluded, so this
+    // specifically exercises `to`'s own binding. `from >= 09:30` additionally
+    // excludes 09:00. The correct final result is exactly 10:02, 10:01,
+    // 10:00 in descending order. If any placeholder were mis-numbered, or if
+    // `to` were dropped entirely, this would instead include 10:03, be
+    // empty, be otherwise wrong, or throw.
     expect(rows.map((r) => r.timestamp.toISOString())).toEqual([
+      '2026-08-29T10:02:00.000Z',
       '2026-08-29T10:01:00.000Z',
       '2026-08-29T10:00:00.000Z',
     ]);
