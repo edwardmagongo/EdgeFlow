@@ -1,0 +1,27 @@
+# Local PostgreSQL and Redis for backend development and tests. CI uses
+# GitHub Actions services: containers with the same images and credentials, so
+# the two environments behave identically.
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: edgeflow
+      POSTGRES_PASSWORD: edgeflow
+      POSTGRES_DB: edgeflow
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U edgeflow"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 20

@@ -30,3 +30,48 @@ jobs:
         # Covers both queue implementations and the new SPMC fixture. The filter is
         # a regex, so this matches every template instantiation of both names.
         run: ./build/benchmarks/edgeflow-benchmarks --benchmark_min_time=1x --benchmark_filter='BM_Queue_SingleThreaded|BM_Queue_SPMC_Push'
+
+  backend:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: edgeflow
+          POSTGRES_PASSWORD: edgeflow
+          POSTGRES_DB: edgeflow
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U edgeflow"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 20
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 20
+    env:
+      DATABASE_URL: postgres://edgeflow:edgeflow@localhost:5432/edgeflow
+      REDIS_URL: redis://localhost:6379
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Install
+        working-directory: backend
+        run: npm ci
+
+      - name: Test
+        working-directory: backend
+        run: npm test
