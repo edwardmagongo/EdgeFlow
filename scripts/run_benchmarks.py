@@ -21,7 +21,10 @@ SHUTDOWN_RE = re.compile(
     r"queue_wait_count=(?P<queue_wait_count>\d+), "
     r"queue_wait_mean_us=(?P<queue_wait_mean_us>[\d.]+), "
     r"queue_wait_p50_us=(?P<queue_wait_p50_us>\d+), "
-    r"queue_wait_p99_us=(?P<queue_wait_p99_us>\d+)\)"
+    # No trailing \) : the gateway appends further keys (batches_*) after this
+    # one, so anchoring on the closing paren would break every time a counter
+    # is added. The named groups are what matter, not what follows them.
+    r"queue_wait_p99_us=(?P<queue_wait_p99_us>\d+)"
 )
 
 FIELDNAMES = [

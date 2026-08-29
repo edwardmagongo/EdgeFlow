@@ -24,6 +24,14 @@ struct StatsSnapshot {
     double queue_wait_mean_us = 0.0;
     std::uint64_t queue_wait_p50_us = 0;
     std::uint64_t queue_wait_p99_us = 0;
+
+    // Batch-level counters for the HTTP sink. Named batches_* so they cannot be
+    // confused with the per-event events_* counters above: one batch carries
+    // many events.
+    std::uint64_t batches_sent = 0;
+    std::uint64_t batches_retried = 0;           // retry ATTEMPTS, not batches
+    std::uint64_t batches_dropped_outbound = 0;  // outbound queue was full
+    std::uint64_t batches_dropped_exhausted = 0; // retries ran out, or shutdown deadline
 };
 
 // Lock-free counters giving observability into gateway ingestion,
@@ -34,6 +42,14 @@ public:
     void record_accepted() { events_accepted_.fetch_add(1, std::memory_order_relaxed); }
     void record_dropped_oldest() { events_dropped_oldest_.fetch_add(1, std::memory_order_relaxed); }
     void record_dropped_newest() { events_dropped_newest_.fetch_add(1, std::memory_order_relaxed); }
+    void record_batch_sent() { batches_sent_.fetch_add(1, std::memory_order_relaxed); }
+    void record_batch_retried() { batches_retried_.fetch_add(1, std::memory_order_relaxed); }
+    void record_batch_dropped_outbound() {
+        batches_dropped_outbound_.fetch_add(1, std::memory_order_relaxed);
+    }
+    void record_batch_dropped_exhausted() {
+        batches_dropped_exhausted_.fetch_add(1, std::memory_order_relaxed);
+    }
     void record_malformed() { events_malformed_.fetch_add(1, std::memory_order_relaxed); }
 
     // Records one queue-wait latency sample.
@@ -68,6 +84,10 @@ public:
         snap.events_dropped_newest = events_dropped_newest();
         snap.events_malformed = events_malformed();
 
+        snap.batches_sent = batches_sent_.load(std::memory_order_relaxed);
+        snap.batches_retried = batches_retried_.load(std::memory_order_relaxed);
+        snap.batches_dropped_outbound = batches_dropped_outbound_.load(std::memory_order_relaxed);
+        snap.batches_dropped_exhausted = batches_dropped_exhausted_.load(std::memory_order_relaxed);
         snap.queue_wait_count = queue_wait_count_.load(std::memory_order_relaxed);
         if (snap.queue_wait_count > 0) {
             snap.queue_wait_min_us = queue_wait_min_us_.load(std::memory_order_relaxed);
@@ -126,6 +146,10 @@ private:
     std::atomic<std::uint64_t> queue_wait_min_us_{UINT64_MAX};
     std::atomic<std::uint64_t> queue_wait_max_us_{0};
     std::array<std::atomic<std::uint64_t>, kBucketCount> queue_wait_buckets_{};
+    std::atomic<std::uint64_t> batches_sent_{0};
+    std::atomic<std::uint64_t> batches_retried_{0};
+    std::atomic<std::uint64_t> batches_dropped_outbound_{0};
+    std::atomic<std::uint64_t> batches_dropped_exhausted_{0};
 };
 
 } // namespace edgeflow

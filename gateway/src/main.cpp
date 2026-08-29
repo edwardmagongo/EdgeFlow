@@ -119,7 +119,16 @@ int main(int argc, char** argv) {
                   << ", queue_wait_count=" << snapshot.queue_wait_count
                   << ", queue_wait_mean_us=" << snapshot.queue_wait_mean_us
                   << ", queue_wait_p50_us=" << snapshot.queue_wait_p50_us
-                  << ", queue_wait_p99_us=" << snapshot.queue_wait_p99_us << ")\n";
+                  << ", queue_wait_p99_us=" << snapshot.queue_wait_p99_us
+                  // Appended AFTER every existing key. run_benchmarks.py's
+                  // SHUTDOWN_RE (which run_saturation_sweep.py imports) is
+                  // anchored on the order above; adding keys at the end is safe,
+                  // reordering or renaming is not.
+                  << ", batches_sent=" << snapshot.batches_sent
+                  << ", batches_retried=" << snapshot.batches_retried
+                  << ", batches_dropped_outbound=" << snapshot.batches_dropped_outbound
+                  << ", batches_dropped_exhausted=" << snapshot.batches_dropped_exhausted
+                  << ")\n";
         return 0;
     } catch (const std::exception& e) {
         std::cerr << "edgeflow-gateway: " << e.what() << '\n';
