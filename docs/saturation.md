@@ -14,20 +14,20 @@ under Block). A gateway that is genuinely saturated instead shows up as
 `gateway-limited`: offered load fell short (same size check as
 `generator-limited`) AND `queue_wait_p99_us` was at least 10x that queue's own baseline (its lowest rung, target=25,000 events/sec) -- i.e. real queueing delay, not generator jitter.
 
-- **mutex**: never saturated: clean at every valid rung up to 25000 events/sec offered. The ceiling is above this and was not reached.
-- **lock-free**: never saturated: clean at every valid rung up to 400000 events/sec offered. The ceiling is above this and was not reached.
+- **mutex**: knee at 200000 events/sec offered; queue-wait signal shows the gateway saturating (no drops under Block policy) starting at 400000 events/sec offered
+- **lock-free**: knee at 200000 events/sec offered; queue-wait signal shows the gateway saturating (no drops under Block policy) starting at 400000 events/sec offered
 
 | target ev/s | queue | sent ev/s | accepted ev/s | dropped | qwait mean (us) | qwait p99 (us) | classification |
 |---|---|---|---|---|---|---|---|
-| 25000 | mutex | 24267.0 | 24267.0 | 0 | 64.2 | 500 | clean |
-| 25000 | lock-free | 24300.0 | 24300.0 | 0 | 64.1 | 500 | clean |
-| 50000 | mutex | 45346.9 | 45346.9 | 0 | 43.9 | 250 | generator-limited |
-| 50000 | lock-free | 47379.3 | 47379.3 | 0 | 51.9 | 250 | generator-limited |
-| 100000 | mutex | 91193.5 | 91193.5 | 0 | 36.6 | 250 | generator-limited |
-| 100000 | lock-free | 91469.4 | 91469.4 | 0 | 33.9 | 250 | generator-limited |
-| 200000 | mutex | 185808.4 | 185808.4 | 0 | 57.4 | 1000 | generator-limited |
-| 200000 | lock-free | 187419.2 | 187419.2 | 0 | 29.8 | 250 | generator-limited |
-| 400000 | mutex | 196427.5 | 196427.5 | 0 | 147.7 | 2500 | generator-limited |
-| 400000 | lock-free | 462162.8 | 462162.8 | 0 | 106.6 | 2500 | clean |
-| 800000 | mutex | 59429.8 | 59429.8 | 0 | 46.3 | 500 | generator-limited |
-| 800000 | lock-free | 65939.1 | 65939.1 | 0 | 53.6 | 500 | generator-limited |
+| 25000 | mutex | 24166.7 | 24166.7 | 0 | 25.4 | 250 | clean |
+| 25000 | lock-free | 24182.8 | 24182.8 | 0 | 16.5 | 250 | clean |
+| 50000 | mutex | 47126.0 | 47126.0 | 0 | 29.6 | 250 | generator-limited |
+| 50000 | lock-free | 47417.6 | 47417.6 | 0 | 43.8 | 250 | generator-limited |
+| 100000 | mutex | 92674.4 | 92674.4 | 0 | 42.5 | 500 | generator-limited |
+| 100000 | lock-free | 92763.9 | 92763.9 | 0 | 29.3 | 250 | generator-limited |
+| 200000 | mutex | 196444.1 | 196444.1 | 0 | 45.0 | 500 | clean |
+| 200000 | lock-free | 196595.6 | 196595.6 | 0 | 39.8 | 250 | clean |
+| 400000 | mutex | 185742.7 | 177736.6 | 0 | 360.6 | 5000 | gateway-limited |
+| 400000 | lock-free | 114924.5 | 114793.7 | 0 | 4240.6 | 25000 | gateway-limited |
+| 800000 | mutex | 104103.9 | 102274.8 | 0 | 365.0 | 2500 | gateway-limited |
+| 800000 | lock-free | 119859.3 | 119760.5 | 0 | 4824.0 | 25000 | gateway-limited |

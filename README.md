@@ -78,27 +78,38 @@ Micro-benchmarks are medians of 9 repetitions; macro rows medians of 3.
 
 ### Gateway saturation (Phase 4)
 
-**The gateway has never been made to drop an event.** Across a ladder of
-offered rates from 25,000 to 800,000 events/sec, against both queue
-implementations, every rung reported zero drops and `accepted == sent`
-exactly. Peak observed: **462,163 events/sec accepted with nothing dropped**.
+**The gateway saturates at roughly 200,000 events/sec offered** on this
+machine. Below that both queues accept everything: 196,596 events/sec
+accepted at the 200,000/sec rung with zero drops and ~40us mean queue wait.
+Above it the pipeline stops keeping up -- accepted falls below sent and mean
+queue wait jumps by an order of magnitude (360us for the mutex queue, 4,241us
+for the lock-free one at the 400,000/sec rung).
 
-The load generator is the bottleneck at every rung above 50,000 events/sec,
-not the gateway. Phase 4 cut the simulator's per-event cost (caching the ISO
-timestamp: 4.65 -> 4.00 us/event) and added `--threads=N` to shard the fleet
-across io_context threads, and it is still the limiting factor. The gateway's
-ceiling remains **unknown and above 462,000 events/sec** -- it is a lower
-bound, not a measurement of the gateway.
+Saturation shows up as **queue-wait blowing out, not as drops**. Under the
+default `--backpressure=block` the connection stops reading and retries rather
+than discarding, so `dropped_oldest`/`dropped_newest` stay at zero even when
+the gateway is well past its limit. A sweep that only watched drop counters
+would report "never saturated" forever; `scripts/run_saturation_sweep.py`
+classifies a rung on queue-wait and on `accepted < sent` as well.
 
-The disk is ruled out as the constraint: re-running the whole ladder with
+Two load-generator findings, both measured:
+
+- **More generator threads make things worse here.** At 1000 devices x 400/sec:
+  1 thread sends 371,506/sec, 2 threads 338,451/sec, 3 threads 71,662/sec.
+  Generator and gateway share ten cores, so extra generator threads take cores
+  the gateway needs. `--threads` exists and works; on one machine, leave it at 1.
+- **The send interval is computed in microseconds.** It used to be whole
+  milliseconds, which silently rounded any rate that did not divide 1000 evenly
+  *upwards* -- 400/sec became 500/sec, 800/sec became 1000/sec -- capping the
+  fleet near 500,000 events/sec and making the ladder's top rungs measure
+  demand nobody asked for.
+
+The disk is not the constraint: re-running the whole ladder with
 `--sink-file=/dev/null` changed accepted throughput by under 5% on nine of
-twelve rungs and produced zero drops either way.
+twelve rungs, with zero drops either way.
 
-One artefact worth knowing: the 800,000/sec rungs achieve *less* than the
-400,000/sec rungs (~60,000 vs ~460,000). `DeviceClient` computes its send
-interval as `1000 / events_per_second` truncated to whole milliseconds, so
-per-device rates above 500/sec collapse onto a 1 ms interval and the fleet
-stops scaling. That is a load-generator limitation, not a gateway one.
+Because generator and gateway share one machine, the knee is a **lower bound**.
+A dedicated load box would very likely push it higher.
 
 ### Queue comparison (Phase 3, unchanged by Phase 4)
 
@@ -106,11 +117,15 @@ stops scaling. That is a load-generator limitation, not a gateway one.
   actually has): mutex 82.2 / 158 / 289 / 1308 ns per push at 1/2/4/8
   consumers, lock-free 53.2 / 53.1 / 138 / 205 ns. The lock-free queue is
   1.6x faster at one consumer and 6.4x at eight.
-- End-to-end the two remain indistinguishable, and Phase 4 did **not** settle
-  the question it set out to settle: since the gateway never saturates, the
-  regime where the queue could matter is still out of reach. `BoundedQueue`
-  (mutex) stays the production default, now for a measured reason rather than
-  an assumed one.
+- Below the knee the two are indistinguishable end to end. **Above it the
+  mutex queue wins**, which is the opposite of what the micro-benchmark
+  predicts: at the 400,000/sec rung the mutex gateway sustained 177,737
+  events/sec at 361us mean queue wait, the lock-free one 114,794 at 4,241us.
+  Worth treating as provisional -- it is three repetitions on a shared machine,
+  and the two differ by more past the knee than anything measured below it.
+- `BoundedQueue` (mutex) stays the production default. Three phases have now
+  failed to find a load at which it is the bottleneck, and the one regime where
+  the two measurably diverge favours it.
 
 Reproduce: build with `-DCMAKE_BUILD_TYPE=Release`, then
 `python3 scripts/run_saturation_sweep.py --build-dir build-release`
