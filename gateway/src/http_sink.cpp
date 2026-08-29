@@ -79,6 +79,14 @@ void HttpSink::run() {
     // pop() blocks until a batch arrives or shutdown() is called, so this loop
     // never spins.
     while (auto body = outbound_.pop()) {
+        // Once stop() has started, honour the drain deadline: anything still
+        // queued past it is counted as dropped rather than silently discarded
+        // or retried forever.
+        if (draining_.load(std::memory_order_acquire) &&
+            std::chrono::steady_clock::now() >= drain_deadline_) {
+            stats_.record_batch_dropped_exhausted();
+            continue;
+        }
         if (send_with_retries(*body)) {
             stats_.record_batch_sent();
         } else {
@@ -88,46 +96,79 @@ void HttpSink::run() {
 }
 
 HttpSink::SendOutcome HttpSink::send_once(const std::string& body) {
-    try {
-        boost::asio::io_context io_context;
-        tcp::resolver resolver(io_context);
-        beast::tcp_stream stream(io_context);
+    // The operations below are ASYNCHRONOUS on purpose. beast::tcp_stream's
+    // expires_after() only governs async operations -- with synchronous
+    // connect/write/read the timeout is silently ignored and a hung backend
+    // parks this thread forever. Everything still runs to completion inside
+    // io_context.run() before returning, so the sink thread is not doing
+    // anything concurrent; the callbacks are just how a deadline gets applied.
+    boost::asio::io_context io_context;
+    beast::tcp_stream stream(io_context);
+    tcp::resolver resolver(io_context);
 
-        const auto endpoints = resolver.resolve(target_.host, target_.port);
-        stream.connect(endpoints);
-
-        http::request<http::string_body> request{http::verb::post, target_.path, 11};
-        request.set(http::field::host, target_.host);
-        request.set(http::field::user_agent, "edgeflow-gateway");
-        request.set(http::field::content_type, "application/x-ndjson");
-        request.body() = body;
-        request.prepare_payload();
-        http::write(stream, request);
-
-        beast::flat_buffer buffer;
-        http::response<http::string_body> response;
-        http::read(stream, buffer, response);
-
-        boost::system::error_code ignored;
-        stream.socket().shutdown(tcp::socket::shutdown_both, ignored);
-
-        const unsigned status = response.result_int();
-        if (status >= 200 && status < 300) {
-            return SendOutcome::Success;
-        }
-        if (status >= 500 || status == 429) {
-            // The backend may recover.
-            return SendOutcome::RetryableFailure;
-        }
-        // Every other 4xx, and every 3xx. A malformed or unauthorised request
-        // will not become valid by repetition, and a redirect is deliberately
-        // not followed: re-POSTing telemetry to an unconfigured host is worse
-        // than a visible failure.
-        return SendOutcome::PermanentFailure;
-    } catch (const std::exception&) {
-        // Refused, reset, resolve failure, or a read that never completed.
+    boost::system::error_code resolve_error;
+    const auto endpoints = resolver.resolve(target_.host, target_.port, resolve_error);
+    if (resolve_error) {
         return SendOutcome::RetryableFailure;
     }
+
+    http::request<http::string_body> request{http::verb::post, target_.path, 11};
+    request.set(http::field::host, target_.host);
+    request.set(http::field::user_agent, "edgeflow-gateway");
+    request.set(http::field::content_type, "application/x-ndjson");
+    request.body() = body;
+    request.prepare_payload();
+
+    beast::flat_buffer buffer;
+    http::response<http::string_body> response;
+    beast::error_code failure;
+
+    // Covers connect, write and read together: the deadline is not reset
+    // between steps, so a backend that stalls at any point is caught.
+    stream.expires_after(options_.timeout);
+    stream.async_connect(endpoints, [&](beast::error_code connect_error,
+                                        const tcp::endpoint&) {
+        if (connect_error) {
+            failure = connect_error;
+            return;
+        }
+        http::async_write(stream, request, [&](beast::error_code write_error, std::size_t) {
+            if (write_error) {
+                failure = write_error;
+                return;
+            }
+            http::async_read(stream, buffer, response,
+                             [&](beast::error_code read_error, std::size_t) {
+                                 if (read_error) {
+                                     failure = read_error;
+                                 }
+                             });
+        });
+    });
+    io_context.run();
+
+    boost::system::error_code ignored;
+    stream.socket().shutdown(tcp::socket::shutdown_both, ignored);
+
+    if (failure) {
+        // Refused, reset, resolve failure, a truncated read, or the deadline
+        // firing. All transient as far as this sink can tell, so all retryable.
+        return SendOutcome::RetryableFailure;
+    }
+
+    const unsigned status = response.result_int();
+    if (status >= 200 && status < 300) {
+        return SendOutcome::Success;
+    }
+    if (status >= 500 || status == 429) {
+        // The backend may recover.
+        return SendOutcome::RetryableFailure;
+    }
+    // Every other 4xx, and every 3xx. A malformed or unauthorised request will
+    // not become valid by repetition, and a redirect is deliberately not
+    // followed: re-POSTing telemetry to an unconfigured host is worse than a
+    // visible failure.
+    return SendOutcome::PermanentFailure;
 }
 
 bool HttpSink::send_with_retries(const std::string& body) {
@@ -163,8 +204,11 @@ void HttpSink::stop() {
         return;
     }
     stopped_ = true;
+    drain_deadline_ = std::chrono::steady_clock::now() + kDrainDeadline;
+    draining_.store(true, std::memory_order_release);
     // shutdown() makes pop() return nullopt once the queue is drained, so the
-    // sink thread finishes the backlog rather than abandoning it.
+    // sink thread finishes the backlog rather than abandoning it -- bounded by
+    // the deadline checked in run().
     outbound_.shutdown();
     if (thread_.joinable()) {
         thread_.join();

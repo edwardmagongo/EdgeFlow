@@ -422,3 +422,99 @@ TEST(HttpSink, EmptyBatchesAreIgnored) {
     EXPECT_EQ(server.request_count(), 0u) << "an empty batch should not become a POST";
     EXPECT_EQ(stats.snapshot().batches_sent, 0u);
 }
+
+TEST(HttpSink, GivesUpOnARequestThatExceedsTheTimeout) {
+    // The stub sits on the request for 2s; the sink is told to wait 200ms.
+    StubHttpServer server;
+    server.script({{StubAction::Ok, std::chrono::milliseconds(2000)}});
+    edgeflow::Stats stats;
+
+    const auto started = std::chrono::steady_clock::now();
+    {
+        auto options = options_for(server.port());
+        options.timeout = std::chrono::milliseconds(200);
+        options.max_retries = 0;
+        HttpSink sink(options, stats);
+        sink.consume(sample_batch());
+        sink.stop();
+    }
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+
+    EXPECT_LT(elapsed, std::chrono::milliseconds(1500))
+        << "the sink waited out the backend instead of timing out";
+    EXPECT_EQ(stats.snapshot().batches_sent, 0u);
+    EXPECT_EQ(stats.snapshot().batches_dropped_exhausted, 1u);
+}
+
+TEST(HttpSink, ATimeoutIsRetryable) {
+    // The stub handles connections SEQUENTIALLY, so its delay blocks every
+    // later request too, not just the one it is answering. The numbers below
+    // are chosen around that: the first response is slow enough to blow a
+    // 150ms deadline, but the backoff is long enough that the stub is free
+    // again by the time the retry arrives. Making the first delay much larger
+    // would simply starve every retry and test nothing.
+    StubHttpServer server;
+    server.script({{StubAction::Ok, std::chrono::milliseconds(300)},
+                   {StubAction::Ok, std::chrono::milliseconds(0)}});
+    edgeflow::Stats stats;
+
+    {
+        auto options = options_for(server.port());
+        options.timeout = std::chrono::milliseconds(150);
+        options.max_retries = 2;
+        options.backoff_base = std::chrono::milliseconds(400);
+        HttpSink sink(options, stats);
+        sink.consume(sample_batch());
+        ASSERT_TRUE(wait_for_requests(server, 2));
+    }
+
+    EXPECT_EQ(stats.snapshot().batches_sent, 1u);
+    EXPECT_GE(stats.snapshot().batches_retried, 1u);
+}
+
+TEST(HttpSink, ShutdownDoesNotHangOnAnUnreachableBackend) {
+    edgeflow::Stats stats;
+    HttpSink::Options options;
+    options.url = "http://127.0.0.1:9/batches"; // discard port -- refused
+    options.outbound_capacity = 256;
+    options.max_retries = 3;
+    options.backoff_base = std::chrono::milliseconds(200);
+
+    const auto started = std::chrono::steady_clock::now();
+    {
+        HttpSink sink(options, stats);
+        for (int i = 0; i < 100; ++i) {
+            sink.consume(sample_batch());
+        }
+        sink.stop();
+    }
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+
+    EXPECT_LT(elapsed, std::chrono::seconds(12))
+        << "stop() took "
+        << std::chrono::duration_cast<std::chrono::seconds>(elapsed).count()
+        << "s; the shutdown drain is not bounded";
+}
+
+TEST(HttpSink, ShutdownDrainsWhatItCanAndCountsTheRest) {
+    StubHttpServer server;
+    server.script({{StubAction::Ok, std::chrono::milliseconds(50)}});
+    edgeflow::Stats stats;
+
+    {
+        auto options = options_for(server.port());
+        options.outbound_capacity = 256;
+        HttpSink sink(options, stats);
+        for (int i = 0; i < 10; ++i) {
+            sink.consume(sample_batch());
+        }
+        sink.stop();
+    }
+
+    auto snapshot = stats.snapshot();
+    const auto accounted = snapshot.batches_sent + snapshot.batches_dropped_outbound +
+                           snapshot.batches_dropped_exhausted;
+    EXPECT_EQ(accounted, 10u)
+        << "every batch must end up in exactly one counter: sent, dropped at the "
+           "outbound queue, or dropped as exhausted";
+}

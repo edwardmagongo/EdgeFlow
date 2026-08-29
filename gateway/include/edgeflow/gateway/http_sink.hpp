@@ -90,6 +90,12 @@ private:
     // Jitter source for backoff. Only the sink thread touches it, so it needs
     // no synchronisation.
     std::mt19937 jitter_rng_{std::random_device{}()};
+    // How long stop() will spend draining before abandoning the backlog. Long
+    // enough for a healthy backend to finish, short enough that an unreachable
+    // one cannot hang gateway shutdown.
+    static constexpr std::chrono::seconds kDrainDeadline{5};
+    std::atomic<bool> draining_{false};
+    std::chrono::steady_clock::time_point drain_deadline_{};
     std::thread thread_;
     bool stopped_ = false;
 };
