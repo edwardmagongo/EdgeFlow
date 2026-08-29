@@ -112,9 +112,9 @@ HTTP sink mints one per batch) and replies with the per-batch outcome:
 
 Invalid lines are skipped individually rather than failing the batch. If
 PostgreSQL is unreachable the endpoint returns **503**, never a 4xx, so the
-sink retries rather than discarding the batch on the spot. See the known defect
-under Benchmarks below: the retry itself is currently suppressed as a duplicate,
-so an outage still loses the batch.
+sink retries rather than discarding the batch on the spot. A failed insert
+releases the batch's idempotency key, so that retry is a real retry rather than
+one suppressed as an already-stored duplicate.
 
 If Redis is unreachable the idempotency check fails open -- the batch is stored
 rather than rejected, on the reasoning that losing telemetry is worse than
@@ -167,15 +167,26 @@ events in PostgreSQL, with Redis holding batch-level idempotency keys:
   retried, dropped, or malformed.
 - Replaying a batch with the same `Idempotency-Key` stores it once.
 
-**Known defect: a batch retried after a database outage is silently lost.** The
-idempotency key is claimed before the insert and is not released if the insert
-fails, so the sequence 503 -> sink retries -> `{"stored":0,"duplicate":true}` ->
-sink sees 2xx and drops the batch writes nothing, while both sides report
-success. Measured: with PostgreSQL stopped for ~8s during a 30s run, the gateway
-reported `batches_retried=66` and `batches_dropped_exhausted=0` while
-`batches_duplicate_suppressed` rose by exactly 66 and ~6,600 events never
-landed. The 503 path is therefore not yet the durability guarantee it is meant
-to be, and this is the first thing to fix in this area.
+**A database-outage data-loss defect was found by the acceptance run and
+fixed.** As originally built, the idempotency key was claimed before the insert
+and never released when the insert failed, so 503 -> sink retries ->
+`{"stored":0,"duplicate":true}` -> sink sees 2xx and drops the batch wrote
+nothing while both sides reported success. It was measured, not theorised: with
+PostgreSQL stopped for ~8s during a 30s run, `batches_duplicate_suppressed` rose
+by exactly the 66 batches the gateway retried and ~6,600 events never landed.
+
+A failed insert now releases the key, and a regression test asserts the retry
+stores the batch. Claiming still happens *before* the insert, which is what
+closes the window where a retry arriving mid-insert would store the batch twice.
+
+**One narrower window remains open.** If the database fails *slowly* rather than
+fast -- a hung insert, a lock pile-up, a failover -- the sink's 5s timeout can
+fire while the first attempt is still inside its insert. The retry then finds
+the key still claimed, gets `{"stored":0,"duplicate":true}`, and drops the batch;
+the first attempt fails afterwards and releases a key nobody is waiting on.
+Closing that needs the claim to distinguish *in flight* from *committed* rather
+than being a single boolean, which is a design change beyond this phase. The
+measured 8s-outage scenario above is fixed; a multi-second hang is not.
 
 **PostgreSQL is now the pipeline's narrowest point, by roughly 8.6x.** The
 gateway ingests about 200,000 events/sec (Phase 4) and this path commits about

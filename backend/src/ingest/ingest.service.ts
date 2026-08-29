@@ -46,7 +46,15 @@ export class IngestService {
         this.metrics.increment('batches_duplicate_suppressed');
         return { received, stored: 0, skipped, duplicate: true };
       }
-      claimedKey = idempotencyKey;
+      if (claim === 'claimed') {
+        // ONLY on 'claimed'. The 'unavailable' fail-open path must not set
+        // this: claim() also returns 'unavailable' when the client is open but
+        // the SET itself errored, and in that case another request may hold a
+        // real claim on this key. Releasing it in our catch block would delete
+        // a live claim we never took, letting a third attempt re-insert a batch
+        // that is already stored.
+        claimedKey = idempotencyKey;
+      }
       // 'unavailable' falls through and ingests without protection.
       // IdempotencyService.claim() already increments redis_unavailable
       // internally -- it's the component that actually knows when Redis is

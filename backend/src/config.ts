@@ -12,6 +12,21 @@ export interface Config {
 // order of 10-17GB. 900s holds ~1.8M keys, on the order of 150MB.
 const DEFAULT_IDEMPOTENCY_TTL_SECONDS = 900;
 
+// Number('15m') is NaN, and NaN propagates silently: SET ... EX NaN fails on
+// every call, so claim() returns 'unavailable' forever and deduplication is
+// off with nothing but a rising redis_unavailable to show for it. Fail at
+// boot instead, which is the whole reason loadConfig() exists.
+function positiveNumber(raw: string | undefined, fallback: number, name: string): number {
+  if (raw === undefined) {
+    return fallback;
+  }
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value <= 0) {
+    throw new Error(`${name} must be a positive number, got: ${raw}`);
+  }
+  return value;
+}
+
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const databaseUrl = env.DATABASE_URL;
   if (!databaseUrl) {
@@ -24,9 +39,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   return {
     databaseUrl,
     redisUrl,
-    port: Number(env.PORT ?? 3000),
-    idempotencyTtlSeconds: Number(
-      env.IDEMPOTENCY_TTL_SECONDS ?? DEFAULT_IDEMPOTENCY_TTL_SECONDS,
+    port: positiveNumber(env.PORT, 3000, 'PORT'),
+    idempotencyTtlSeconds: positiveNumber(
+      env.IDEMPOTENCY_TTL_SECONDS,
+      DEFAULT_IDEMPOTENCY_TTL_SECONDS,
+      'IDEMPOTENCY_TTL_SECONDS',
     ),
   };
 }
