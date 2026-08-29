@@ -179,6 +179,15 @@ A failed insert now releases the key, and a regression test asserts the retry
 stores the batch. Claiming still happens *before* the insert, which is what
 closes the window where a retry arriving mid-insert would store the batch twice.
 
+Re-measured against a real stopped database, same 30s / 5,000 events-per-second
+shape: `batches_duplicate_suppressed` went from 66 (exactly matching
+`batches_retried`, the defect's signature) to 1 against 13 retries, and every
+event not stored is now attributable to a counter the gateway reports -- 169
+batches shed at the sink's outbound queue and 3 exhausted -- rather than
+vanishing while both sides report success. The re-run also exposed a crash:
+stopping PostgreSQL killed the backend outright via an unhandled `pg` client
+error (57P01) on a checked-out connection, which is now handled.
+
 **One narrower window remains open.** If the database fails *slowly* rather than
 fast -- a hung insert, a lock pile-up, a failover -- the sink's 5s timeout can
 fire while the first attempt is still inside its insert. The retry then finds
