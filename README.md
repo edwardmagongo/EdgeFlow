@@ -3,15 +3,18 @@
 A concurrent C++20 telemetry pipeline: simulated devices → TCP gateway →
 bounded queue → worker pool → batcher → sink.
 
-Phases 1-5 have landed: the C++ core pipeline with a file-backed sink
+Phases 1-6 have landed: the C++ core pipeline with a file-backed sink
 (Phase 1), a benchmark suite and simulator chaos scenarios (Phase 2), a
 lock-free queue variant benchmarked against the mutex one (Phase 3), a
 saturating load generator that located the gateway's throughput knee
-(Phase 4), and an HTTP sink that POSTs NDJSON batches to a backend endpoint
-(Phase 5). The HTTP sink talks to any endpoint you point it at, but there is
-still no cloud backend, database, or dashboard in this repository. Each phase
-has its own spec under `docs/superpowers/specs/` and a plan under
-`docs/superpowers/plans/`; Phases 2-5 also have a task-by-task execution log
+(Phase 4), an HTTP sink that POSTs NDJSON batches to a backend endpoint
+(Phase 5), and a NestJS ingestion backend that validates those batches and
+stores them in PostgreSQL, with Redis holding batch-level idempotency keys
+(Phase 6). The HTTP sink still talks to any endpoint you point it at. There
+is now a database and a service to write to it, but no cloud deployment, no
+dashboard, and no read/query API in this repository. Each phase has its own
+spec under `docs/superpowers/specs/` and a plan under
+`docs/superpowers/plans/`; Phases 2-6 also have a task-by-task execution log
 under `docs/superpowers/progress/`.
 
 ## Build
@@ -67,6 +70,51 @@ Inspect the output:
     wc -l /tmp/edgeflow_events.ndjson
     head -n 3 /tmp/edgeflow_events.ndjson
 
+### Ingestion backend
+
+To store events instead of writing them to a file, start PostgreSQL and Redis,
+apply the migration, and run the backend:
+
+    docker compose up -d
+    cd backend && npm install
+    npm run migrate
+    npm run build && npm start
+
+Then point the gateway at it:
+
+    ./build/gateway/edgeflow-gateway --port=9000 --workers=4 \
+        --sink=http --sink-url=http://127.0.0.1:3000/v1/events \
+        --batch-size=100 --batch-age-ms=200
+
+The service reads four environment variables:
+
+- `DATABASE_URL` (required) -- PostgreSQL connection string.
+- `REDIS_URL` (required) -- Redis connection string.
+- `PORT` (default `3000`) -- the HTTP port to listen on.
+- `IDEMPOTENCY_TTL_SECONDS` (default `900`) -- how long a batch's
+  `Idempotency-Key` is remembered.
+
+`docker compose up -d` binds PostgreSQL to host port **5433** and Redis to
+**6380**, not their defaults, so it does not collide with other containers on
+the same machine. Match them:
+
+    export DATABASE_URL=postgres://edgeflow:edgeflow@localhost:5433/edgeflow
+    export REDIS_URL=redis://localhost:6380
+
+`POST /v1/events` takes an NDJSON body and an `Idempotency-Key` header (the
+HTTP sink mints one per batch) and replies with the per-batch outcome:
+
+    {"received":5,"stored":5,"skipped":0,"duplicate":false}
+
+`GET /v1/health` reports dependency reachability and six counters:
+`batches_received`, `batches_duplicate_suppressed`, `events_stored`,
+`events_skipped_malformed`, `db_failures`, `redis_unavailable`.
+
+Invalid lines are skipped individually rather than failing the batch. If
+PostgreSQL is unreachable the endpoint returns **503**, never a 4xx, so the
+sink's retry and outbound queue absorb the outage instead of discarding the
+batch permanently.
+
 On shutdown (SIGINT/SIGTERM), the gateway prints its observability counters:
 accepted, dropped_oldest, dropped_newest, and malformed event counts, plus
 queue-wait latency (time from a connection enqueueing an event to a worker
@@ -86,6 +134,48 @@ Real, measured numbers from `scripts/run_benchmarks.py`,
 and `docs/saturation.md` for the full tables. Apple M-series, 10 cores,
 `-DCMAKE_BUILD_TYPE=Release`, gateway and simulator sharing one machine.
 Micro-benchmarks are medians of 9 repetitions; macro rows medians of 3.
+
+### Ingestion backend (Phase 6)
+
+The gateway can POST batches to a NestJS service that validates them and stores
+events in PostgreSQL, with Redis holding batch-level idempotency keys:
+`--sink=http --sink-url=http://host:port/v1/events`.
+
+- **Sustained ingest: 23,195 events/sec** (median of three runs, load average
+  7.02 / 8.10 / 8.02 at run start), against the gateway's ~200,000 events/sec
+  saturation knee from Phase 4. The three runs were 23,195 / 23,876 / 18,653
+  events/sec; the low one is the run during which background load climbed to
+  11.83. Method: 500 simulated devices at 50 events/sec for 30s into a Release
+  gateway (`--batch-size=100 --batch-age-ms=200`), throughput measured as rows
+  committed divided by wall time, after a discarded warmup run.
+- **The ceiling is real, not an artifact of the offered load.** Tripling the
+  offer to 75,000 events/sec did not move it: the backend stored 23,324 and
+  22,427 events/sec on two runs at comparable load, while the gateway's
+  outbound queue shed 14,625 and 14,819 batches. Across the four runs taken at
+  load average below 9.4 -- at both offered rates -- ingest sat between 22,427
+  and 23,876 events/sec, a 6.5% spread.
+- Nothing is lost or duplicated across the language boundary: at an offered
+  rate below the ceiling (500 devices at 20 events/sec), 294,064 events
+  accepted by the gateway produced exactly 294,064 rows, with zero batches
+  retried, dropped, or malformed.
+- Replaying a batch with the same `Idempotency-Key` stores it once.
+
+**PostgreSQL is now the pipeline's narrowest point, by roughly 8.6x.** The
+gateway ingests about 200,000 events/sec (Phase 4) and this path commits about
+23,200, so the C++ side is no longer the constraint by a wide margin -- one
+synchronous service doing multi-row `INSERT`s inside a transaction is. Past the
+ceiling the loss is orderly and visible rather than silent: the sink's
+256-batch outbound queue fills and increments `batches_dropped_outbound`, which
+is what the 14,625-batch figure above is counting. Nothing was ever retried or
+exhausted, so the backend was returning 200s the whole time -- it was simply
+returning them more slowly than the gateway produced work.
+
+These numbers are a floor rather than a specification. PostgreSQL and Redis are
+local containers on the same ten cores as the gateway and the load generator,
+so they measure the cost of this ingestion path on one machine, not the
+capacity of a deployed system. No tuning was attempted: default
+`postgres:16-alpine` settings, one connection pool, no batching across
+requests, no partitioning, no `COPY`.
 
 ### Gateway saturation (Phase 4)
 
