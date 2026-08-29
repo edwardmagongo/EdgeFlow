@@ -7,6 +7,7 @@ add_executable(edgeflow-tests
     test_queue_stress.cpp
     test_batcher.cpp
     test_file_sink.cpp
+    test_http_sink.cpp
     test_worker_pool.cpp
     test_args.cpp
     test_gateway_config.cpp
@@ -17,6 +18,9 @@ add_executable(edgeflow-tests
     test_device_client_integration.cpp
     test_timed_event.cpp
 )
+
+# So tests can include stub_http_server.hpp by its bare name.
+target_include_directories(edgeflow-tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
 target_link_libraries(edgeflow-tests PRIVATE
     edgeflow-core
