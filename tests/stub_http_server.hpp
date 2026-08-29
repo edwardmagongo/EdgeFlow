@@ -38,8 +38,8 @@ struct StubResponse {
 // keeps replying with the last entry, so a test that only cares about "always
 // 500" can script a single entry.
 //
-// Records every request body and Content-Type so tests can assert on the exact
-// bytes the sink put on the wire.
+// Records every request body, Content-Type and Idempotency-Key so tests can
+// assert on the exact bytes and headers the sink put on the wire.
 class StubHttpServer {
 public:
     StubHttpServer()
@@ -68,6 +68,11 @@ public:
     std::vector<std::string> content_types() const {
         std::lock_guard<std::mutex> lock(mutex_);
         return content_types_;
+    }
+
+    std::vector<std::string> idempotency_keys() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return idempotency_keys_;
     }
 
     std::size_t request_count() const {
@@ -103,10 +108,12 @@ private:
         return script_[index];
     }
 
-    void record(const std::string& body, const std::string& content_type) {
+    void record(const std::string& body, const std::string& content_type,
+                const std::string& idempotency_key) {
         std::lock_guard<std::mutex> lock(mutex_);
         bodies_.push_back(body);
         content_types_.push_back(content_type);
+        idempotency_keys_.push_back(idempotency_key);
     }
 
     void serve() {
@@ -124,7 +131,8 @@ private:
             if (error) continue;
 
             auto content_type = request[http::field::content_type];
-            record(request.body(), std::string(content_type));
+            auto idempotency_key = request["Idempotency-Key"];
+            record(request.body(), std::string(content_type), std::string(idempotency_key));
 
             const StubResponse response = next_response();
             if (response.delay.count() > 0) {
@@ -175,6 +183,7 @@ private:
     std::size_t served_ = 0;
     std::vector<std::string> bodies_;
     std::vector<std::string> content_types_;
+    std::vector<std::string> idempotency_keys_;
 };
 
 } // namespace edgeflow::testing

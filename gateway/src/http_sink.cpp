@@ -4,6 +4,7 @@
 #include <boost/beast/core.hpp>
 #include <boost/beast/http.hpp>
 #include <algorithm>
+#include <cstdio>
 #include <random>
 #include <stdexcept>
 #include <thread>
@@ -56,6 +57,23 @@ HttpSink::Target HttpSink::parse_url(const std::string& url) {
     return target;
 }
 
+std::string HttpSink::make_key_prefix() {
+    std::random_device device;
+    std::mt19937_64 engine(device());
+    std::uniform_int_distribution<std::uint64_t> distribution;
+    char buffer[17];
+    std::snprintf(buffer, sizeof(buffer), "%016llx",
+                  static_cast<unsigned long long>(distribution(engine)));
+    return std::string(buffer);
+}
+
+std::string HttpSink::next_idempotency_key() {
+    // relaxed is sufficient: the counter only needs to be unique, never ordered
+    // against anything else.
+    return key_prefix_ + "-" +
+           std::to_string(key_counter_.fetch_add(1, std::memory_order_relaxed));
+}
+
 void HttpSink::consume(const std::vector<edgeflow::Event>& batch) {
     if (batch.empty()) {
         return;
@@ -67,8 +85,11 @@ void HttpSink::consume(const std::vector<edgeflow::Event>& batch) {
         body += edgeflow::serialize_event(event);
         body += '\n';
     }
+    // The key is minted HERE, once, as the batch is created -- not at send
+    // time. Every retry of this batch then carries this same value.
+    OutboundBatch queued{std::move(body), next_idempotency_key()};
     // Non-blocking under the drop-* policies; see the note on the class.
-    const auto result = outbound_.push(std::move(body));
+    const auto result = outbound_.push(std::move(queued));
     if (result == edgeflow::PushResult::RejectedBackpressure ||
         result == edgeflow::PushResult::DroppedOldest) {
         stats_.record_batch_dropped_outbound();
@@ -78,7 +99,7 @@ void HttpSink::consume(const std::vector<edgeflow::Event>& batch) {
 void HttpSink::run() {
     // pop() blocks until a batch arrives or shutdown() is called, so this loop
     // never spins.
-    while (auto body = outbound_.pop()) {
+    while (auto batch = outbound_.pop()) {
         // Once stop() has started, honour the drain deadline: anything still
         // queued past it is counted as dropped rather than silently discarded
         // or retried forever.
@@ -87,7 +108,7 @@ void HttpSink::run() {
             stats_.record_batch_dropped_exhausted();
             continue;
         }
-        if (send_with_retries(*body)) {
+        if (send_with_retries(*batch)) {
             stats_.record_batch_sent();
         } else {
             stats_.record_batch_dropped_exhausted();
@@ -95,7 +116,7 @@ void HttpSink::run() {
     }
 }
 
-HttpSink::SendOutcome HttpSink::send_once(const std::string& body) {
+HttpSink::SendOutcome HttpSink::send_once(const OutboundBatch& batch) {
     // The operations below are ASYNCHRONOUS on purpose. beast::tcp_stream's
     // expires_after() only governs async operations -- with synchronous
     // connect/write/read the timeout is silently ignored and a hung backend
@@ -116,7 +137,8 @@ HttpSink::SendOutcome HttpSink::send_once(const std::string& body) {
     request.set(http::field::host, target_.host);
     request.set(http::field::user_agent, "edgeflow-gateway");
     request.set(http::field::content_type, "application/x-ndjson");
-    request.body() = body;
+    request.set("Idempotency-Key", batch.idempotency_key);
+    request.body() = batch.body;
     request.prepare_payload();
 
     beast::flat_buffer buffer;
@@ -171,10 +193,10 @@ HttpSink::SendOutcome HttpSink::send_once(const std::string& body) {
     return SendOutcome::PermanentFailure;
 }
 
-bool HttpSink::send_with_retries(const std::string& body) {
+bool HttpSink::send_with_retries(const OutboundBatch& batch) {
     std::chrono::milliseconds backoff = options_.backoff_base;
     for (std::size_t attempt = 0; attempt <= options_.max_retries; ++attempt) {
-        const SendOutcome outcome = send_once(body);
+        const SendOutcome outcome = send_once(batch);
         if (outcome == SendOutcome::Success) {
             return true;
         }

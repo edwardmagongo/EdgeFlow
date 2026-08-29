@@ -518,3 +518,62 @@ TEST(HttpSink, ShutdownDrainsWhatItCanAndCountsTheRest) {
         << "every batch must end up in exactly one counter: sent, dropped at the "
            "outbound queue, or dropped as exhausted";
 }
+
+TEST(HttpSink, SendsAnIdempotencyKey) {
+    StubHttpServer server;
+    server.script({{StubAction::Ok, std::chrono::milliseconds(0)}});
+    edgeflow::Stats stats;
+
+    {
+        HttpSink sink(options_for(server.port()), stats);
+        sink.consume(sample_batch());
+        ASSERT_TRUE(wait_for_requests(server, 1));
+    }
+
+    auto keys = server.idempotency_keys();
+    ASSERT_EQ(keys.size(), 1u);
+    EXPECT_FALSE(keys[0].empty()) << "no Idempotency-Key header reached the backend";
+}
+
+TEST(HttpSink, ReusesTheSameKeyAcrossARetry) {
+    // THE test for this task. A key minted per attempt instead of per batch
+    // would still pass every other test in this file -- the batch is delivered,
+    // the counters are right -- while making backend deduplication impossible.
+    // Only comparing the two keys catches it.
+    StubHttpServer server;
+    server.script({{StubAction::ServerError, std::chrono::milliseconds(0)},
+                   {StubAction::Ok, std::chrono::milliseconds(0)}});
+    edgeflow::Stats stats;
+
+    {
+        auto options = options_for(server.port());
+        options.backoff_base = std::chrono::milliseconds(10);
+        HttpSink sink(options, stats);
+        sink.consume(sample_batch());
+        ASSERT_TRUE(wait_for_requests(server, 2));
+    }
+
+    auto keys = server.idempotency_keys();
+    ASSERT_EQ(keys.size(), 2u);
+    EXPECT_EQ(keys[0], keys[1])
+        << "the retry minted a fresh key, so the backend cannot tell it is a retry";
+    EXPECT_EQ(stats.snapshot().batches_sent, 1u);
+}
+
+TEST(HttpSink, GivesDifferentBatchesDifferentKeys) {
+    StubHttpServer server;
+    server.script({{StubAction::Ok, std::chrono::milliseconds(0)}});
+    edgeflow::Stats stats;
+
+    {
+        HttpSink sink(options_for(server.port()), stats);
+        sink.consume(sample_batch());
+        sink.consume(sample_batch());
+        ASSERT_TRUE(wait_for_requests(server, 2));
+    }
+
+    auto keys = server.idempotency_keys();
+    ASSERT_EQ(keys.size(), 2u);
+    EXPECT_NE(keys[0], keys[1])
+        << "two distinct batches shared a key; the backend would discard the second";
+}

@@ -70,10 +70,31 @@ private:
         PermanentFailure,  // 4xx other than 429, or 3xx -- will not improve
     };
 
-    SendOutcome send_once(const std::string& body);
+    // One queued batch: the serialised body together with the idempotency key
+    // minted for it. The key lives WITH the batch rather than being generated
+    // at send time, which is precisely what makes it survive a retry.
+    struct OutboundBatch {
+        std::string body;
+        std::string idempotency_key;
+    };
+
+    SendOutcome send_once(const OutboundBatch& batch);
     // Runs send_once up to 1 + options_.max_retries times, backing off between
     // attempts. Returns true if the batch was delivered.
-    bool send_with_retries(const std::string& body);
+    bool send_with_retries(const OutboundBatch& batch);
+
+    // A random per-process prefix plus a monotonic counter. Unique within the
+    // process by construction, and unique across processes with overwhelming
+    // probability.
+    //
+    // Thread-safe because consume() runs on whichever thread flushed the
+    // Batcher -- worker threads and the periodic flush thread both do. Batcher
+    // happens to call the sink callback under its own mutex today, but that is
+    // Batcher's internal detail rather than part of the Sink contract, so this
+    // does not lean on it. Note this deliberately does NOT use jitter_rng_,
+    // which is documented as sink-thread-only.
+    std::string next_idempotency_key();
+    static std::string make_key_prefix();
 
     // Split from the URL once at construction so the send path does no parsing.
     struct Target {
@@ -86,7 +107,9 @@ private:
     Options options_;
     Target target_;
     edgeflow::Stats& stats_;
-    edgeflow::BoundedQueue<std::string> outbound_;
+    edgeflow::BoundedQueue<OutboundBatch> outbound_;
+    const std::string key_prefix_ = make_key_prefix();
+    std::atomic<std::uint64_t> key_counter_{0};
     // Jitter source for backoff. Only the sink thread touches it, so it needs
     // no synchronisation.
     std::mt19937 jitter_rng_{std::random_device{}()};
