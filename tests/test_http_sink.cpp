@@ -322,3 +322,103 @@ TEST(HttpSink, BackoffGrowsBetweenAttempts) {
     EXPECT_GE(elapsed, std::chrono::milliseconds(120))
         << "backoff does not appear to be growing between attempts";
 }
+
+TEST(HttpSink, ConsumeDoesNotBlockOnASlowBackend) {
+    // THE architectural claim of this phase. A worker thread must hand the batch
+    // over and return, whatever the backend is doing.
+    StubHttpServer server;
+    server.script({{StubAction::Ok, std::chrono::milliseconds(400)}});
+    edgeflow::Stats stats;
+
+    auto options = options_for(server.port());
+    options.outbound_capacity = 64;
+    HttpSink sink(options, stats);
+
+    const auto started = std::chrono::steady_clock::now();
+    for (int i = 0; i < 8; ++i) {
+        sink.consume(sample_batch());
+    }
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+
+    EXPECT_LT(elapsed, std::chrono::milliseconds(200))
+        << "consume() took "
+        << std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count()
+        << "ms for 8 batches against a 400ms-per-request backend; it is blocking "
+           "on the network instead of queueing";
+    sink.stop();
+}
+
+TEST(HttpSink, DropsOldestAndCountsWhenTheOutboundQueueFills) {
+    StubHttpServer server;
+    server.script({{StubAction::Ok, std::chrono::milliseconds(300)}});
+    edgeflow::Stats stats;
+
+    auto options = options_for(server.port());
+    options.outbound_capacity = 2;
+    options.backpressure = edgeflow::BackpressurePolicy::DropOldest;
+    HttpSink sink(options, stats);
+
+    for (int i = 0; i < 40; ++i) {
+        sink.consume(sample_batch());
+    }
+
+    EXPECT_GT(stats.snapshot().batches_dropped_outbound, 0u)
+        << "40 batches into a 2-deep queue behind a 300ms backend dropped nothing";
+    sink.stop();
+}
+
+TEST(HttpSink, DropNewestAlsoCountsOverflow) {
+    StubHttpServer server;
+    server.script({{StubAction::Ok, std::chrono::milliseconds(300)}});
+    edgeflow::Stats stats;
+
+    auto options = options_for(server.port());
+    options.outbound_capacity = 2;
+    options.backpressure = edgeflow::BackpressurePolicy::DropNewest;
+    HttpSink sink(options, stats);
+
+    for (int i = 0; i < 40; ++i) {
+        sink.consume(sample_batch());
+    }
+
+    EXPECT_GT(stats.snapshot().batches_dropped_outbound, 0u);
+    sink.stop();
+}
+
+TEST(HttpSink, OverflowAndExhaustionAreCountedSeparately) {
+    // An outage looks like exhaustion, a burst looks like overflow; conflating
+    // them would make the counters useless for diagnosis.
+    StubHttpServer server;
+    server.script({{StubAction::ServerError, std::chrono::milliseconds(0)}});
+    edgeflow::Stats stats;
+
+    {
+        auto options = options_for(server.port());
+        options.outbound_capacity = 64;
+        options.max_retries = 0;
+        options.backoff_base = std::chrono::milliseconds(1);
+        HttpSink sink(options, stats);
+        sink.consume(sample_batch());
+        ASSERT_TRUE(wait_for_requests(server, 1));
+    }
+
+    auto snapshot = stats.snapshot();
+    EXPECT_EQ(snapshot.batches_dropped_exhausted, 1u);
+    EXPECT_EQ(snapshot.batches_dropped_outbound, 0u);
+    EXPECT_EQ(snapshot.batches_sent, 0u);
+}
+
+TEST(HttpSink, EmptyBatchesAreIgnored) {
+    StubHttpServer server;
+    server.script({{StubAction::Ok, std::chrono::milliseconds(0)}});
+    edgeflow::Stats stats;
+
+    {
+        HttpSink sink(options_for(server.port()), stats);
+        sink.consume({});
+        std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    }
+
+    EXPECT_EQ(server.request_count(), 0u) << "an empty batch should not become a POST";
+    EXPECT_EQ(stats.snapshot().batches_sent, 0u);
+}
