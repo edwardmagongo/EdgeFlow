@@ -79,7 +79,7 @@ FIELDNAMES = [
 
 
 def run_rung(gateway_bin, simulator_bin, sink_file, target, queue, *,
-             devices, duration, queue_capacity, port):
+             devices, duration, queue_capacity, port, sink="file", sink_url=""):
     """One rung, one queue. Returns a dict of measurements."""
     rate = target / devices
     result = {
@@ -92,10 +92,15 @@ def run_rung(gateway_bin, simulator_bin, sink_file, target, queue, *,
     # points the sink at /dev/null, which exists and must not be unlinked.
     if sink_file.is_file():
         sink_file.unlink()
+    gateway_cmd = [str(gateway_bin), f"--port={port}",
+                   f"--queue-capacity={queue_capacity}", "--workers=4",
+                   "--backpressure=block", f"--sink-file={sink_file}"]
+    if sink == "http":
+        # The file sink flag stays harmlessly present; --sink selects which one
+        # is actually constructed.
+        gateway_cmd += [f"--sink=http", f"--sink-url={sink_url}"]
     gateway = subprocess.Popen(
-        [str(gateway_bin), f"--port={port}", f"--queue-capacity={queue_capacity}",
-         "--workers=4", "--backpressure=block", f"--sink-file={sink_file}"],
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        gateway_cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     time.sleep(0.5)  # let the acceptor bind before the fleet connects
 
     try:
@@ -275,6 +280,10 @@ def main():
     parser.add_argument("--sink-file", default="/tmp/edgeflow_saturation.ndjson")
     parser.add_argument("--out-csv", default="benchmarks/saturation.csv")
     parser.add_argument("--out-md", default="docs/saturation.md")
+    parser.add_argument("--sink", choices=("file", "http"), default="file",
+                        help="which gateway sink to sweep against")
+    parser.add_argument("--sink-url", default="http://127.0.0.1:18080/batches",
+                        help="backend URL when --sink=http")
     args = parser.parse_args()
 
     repo_root = Path(__file__).resolve().parent.parent
@@ -304,7 +313,8 @@ def main():
                 reps.append(run_rung(
                     gateway_bin, simulator_bin, sink_file, target, queue,
                     devices=args.devices, duration=args.duration,
-                    queue_capacity=args.queue_capacity, port=19500))
+                    queue_capacity=args.queue_capacity, port=19500,
+                    sink=args.sink, sink_url=args.sink_url))
             row = aggregate(reps)
             if row["error"]:
                 print(f"  FAILED: {row['error']}", file=sys.stderr)
