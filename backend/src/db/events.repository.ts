@@ -1,5 +1,6 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { Pool } from 'pg';
+import { Cursor } from '../events-query/cursor';
 import { EventRow } from '../ingest/ndjson.parser';
 import { PG_POOL } from './pool';
 
@@ -8,6 +9,26 @@ const COLUMNS_PER_ROW = 7;
 // about 9,362 rows; 5,000 keeps a wide margin without making the chunk count
 // large for the 100-row batches the gateway actually sends.
 const MAX_ROWS_PER_STATEMENT = 5000;
+
+export interface EventQueryRow {
+  deviceId: number;
+  timestamp: Date;
+  temperature: number;
+  battery: number;
+  latitude: number;
+  longitude: number;
+  eventType: string;
+  id: number;
+}
+
+export interface QueryEventsParams {
+  deviceId: number;
+  from?: Date;
+  to?: Date;
+  cursor?: Cursor;
+  limit: number;
+  order: 'asc' | 'desc';
+}
 
 function chunk<T>(items: T[], size: number): T[][] {
   const chunks: T[][] = [];
@@ -64,6 +85,61 @@ export class EventsRepository {
       // to the pool, or the pool hands the dead socket to the next caller.
       client.release(connectionFailed ? true : undefined);
     }
+  }
+
+  // Keyset pagination: the cursor bounds (timestamp, id) directly rather than
+  // an OFFSET, so a concurrent insert anywhere in the table cannot cause an
+  // already-returned row to repeat or a not-yet-returned row to be skipped --
+  // see docs/superpowers/specs/2026-08-29-phase7-events-query-api-design.md.
+  async queryEvents(params: QueryEventsParams): Promise<EventQueryRow[]> {
+    const { deviceId, from, to, cursor, limit, order } = params;
+    const comparisonOperator = order === 'desc' ? '<' : '>';
+    const direction = order.toUpperCase();
+
+    const conditions: string[] = ['device_id = $1'];
+    const values: unknown[] = [deviceId];
+
+    if (from) {
+      values.push(from);
+      conditions.push(`timestamp >= $${values.length}`);
+    }
+    if (to) {
+      values.push(to);
+      conditions.push(`timestamp <= $${values.length}`);
+    }
+    if (cursor) {
+      values.push(new Date(cursor.timestamp), cursor.id);
+      const tsParam = values.length - 1;
+      const idParam = values.length;
+      conditions.push(`(timestamp, id) ${comparisonOperator} ($${tsParam}, $${idParam})`);
+    }
+
+    values.push(limit);
+    const limitParam = values.length;
+
+    const result = await this.pool.query(
+      `SELECT device_id, timestamp, temperature, battery, latitude, longitude, event_type, id
+       FROM events
+       WHERE ${conditions.join(' AND ')}
+       ORDER BY timestamp ${direction}, id ${direction}
+       LIMIT $${limitParam}`,
+      values,
+    );
+
+    // device_id and id are bigint columns; pg returns bigint as a string by
+    // default to avoid precision loss outside Number.MAX_SAFE_INTEGER. This
+    // project's device IDs and row counts are always far below that range, so
+    // converting back to a JS number here is deliberate, not a bug.
+    return result.rows.map((r) => ({
+      deviceId: Number(r.device_id),
+      timestamp: r.timestamp,
+      temperature: r.temperature,
+      battery: r.battery,
+      latitude: r.latitude,
+      longitude: r.longitude,
+      eventType: r.event_type,
+      id: Number(r.id),
+    }));
   }
 
   private async insertChunk(
