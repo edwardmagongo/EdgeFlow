@@ -20,6 +20,11 @@ describe('EventsQueryService', () => {
     await expect(service.query({ deviceId: 'abc' })).rejects.toBeInstanceOf(BadRequestException);
   });
 
+  it('rejects a device_id that is an unsafely-large integer', async () => {
+    const service = new EventsQueryService(makeRepository());
+    await expect(service.query({ deviceId: '1e30' })).rejects.toBeInstanceOf(BadRequestException);
+  });
+
   it('rejects an unparseable from', async () => {
     const service = new EventsQueryService(makeRepository());
     await expect(service.query({ deviceId: '1', from: 'not-a-date' })).rejects.toBeInstanceOf(BadRequestException);

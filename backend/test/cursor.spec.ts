@@ -37,4 +37,12 @@ describe('cursor encode/decode', () => {
     const badDate = Buffer.from(JSON.stringify({ timestamp: 'not-a-date', id: 42 }), 'utf8').toString('base64');
     expect(decodeCursor(badDate)).toBeNull();
   });
+
+  it('returns null when id is not an integer', () => {
+    const fractionalId = Buffer.from(
+      JSON.stringify({ timestamp: '2026-08-29T10:15:00.000Z', id: 1.5 }),
+      'utf8',
+    ).toString('base64');
+    expect(decodeCursor(fractionalId)).toBeNull();
+  });
 });

@@ -30,7 +30,7 @@ export function decodeCursor(value: string): Cursor | null {
   if (typeof candidate.timestamp !== 'string' || typeof candidate.id !== 'number') {
     return null;
   }
-  if (!Number.isFinite(candidate.id)) {
+  if (!Number.isSafeInteger(candidate.id)) {
     return null;
   }
   if (Number.isNaN(new Date(candidate.timestamp).getTime())) {

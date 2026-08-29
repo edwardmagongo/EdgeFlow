@@ -150,6 +150,89 @@ describe('GET /v1/events', () => {
     expect(page2.body.next_cursor).toBeNull();
   });
 
+  it('is not corrupted by a concurrent insert between two page fetches (order=asc)', async () => {
+    // Oldest-first counterpart of the desc test above. e1 is the oldest of
+    // the three seeded rows; page 1 (limit 2) returns [e1, e2]. The safe
+    // insert position that mirrors desc's "insert newer than everything" is
+    // its structural opposite here: a row OLDER than everything already
+    // fetched. (Note: inserting something NEWER than e3 is not the correct
+    // asc counterpart -- asc's forward-looking "> cursor" bound has no upper
+    // limit, so a newer row would legitimately be picked up on the very next
+    // page, which is correct behavior but a different scenario than what
+    // this test targets.) A row older than e1 is naturally excluded by the
+    // "> cursor" bound, so it cannot corrupt this walk -- exactly as e2/e1
+    // are protected on the desc side.
+    await repository.insertEvents([
+      row(1, '2026-08-29T10:00:00Z'), // e1, oldest
+      row(1, '2026-08-29T10:01:00Z'), // e2
+      row(1, '2026-08-29T10:02:00Z'), // e3, newest
+    ]);
+
+    const page1 = await request(app.getHttpServer()).get('/v1/events?device_id=1&limit=2&order=asc');
+    expect(page1.status).toBe(200);
+    expect(page1.body.events.map((e: { timestamp: string }) => e.timestamp)).toEqual([
+      '2026-08-29T10:00:00.000Z',
+      '2026-08-29T10:01:00.000Z',
+    ]);
+    expect(page1.body.next_cursor).not.toBeNull();
+
+    // Concurrent insert: older than e1.
+    await repository.insertEvents([row(1, '2026-08-29T09:00:00Z')]);
+
+    const page2 = await request(app.getHttpServer()).get(
+      `/v1/events?device_id=1&limit=2&order=asc&cursor=${encodeURIComponent(page1.body.next_cursor)}`,
+    );
+    expect(page2.status).toBe(200);
+    expect(page2.body.events.map((e: { timestamp: string }) => e.timestamp)).toEqual([
+      '2026-08-29T10:02:00.000Z',
+    ]);
+    expect(page2.body.next_cursor).toBeNull();
+  });
+
+  it('does not surface a row inserted behind the cursor into an already-paginated region (documented limitation)', async () => {
+    // Demonstrates the documented limitation from the design spec's Goals
+    // section: keyset pagination guarantees no loss/duplication of rows
+    // already fetched or present at query time, but a row inserted mid-walk
+    // with a timestamp that lands INSIDE the range a prior page already swept
+    // is never returned by this pagination walk. Newest-first (default
+    // order): page 1 (limit 2) returns [e3 @10:02, e2 @10:01] and the cursor
+    // is now positioned at e2. A late-arriving row with timestamp 10:01:30 --
+    // strictly between the cursor (10:01) and page 1's already-returned
+    // upper bound (10:02) -- falls into territory page 1 already fully swept
+    // before this row existed. Page 2's bound is `< cursor (10:01)`, which
+    // excludes 10:01:30 (it is not less than 10:01), so it is not picked up
+    // there either. It is not lost forever in an absolute sense -- a fresh,
+    // cursor-less query would find it -- but it can never appear within THIS
+    // pagination walk, which is exactly the limitation the design spec now
+    // states explicitly rather than leaving implicit.
+    await repository.insertEvents([
+      row(1, '2026-08-29T10:00:00Z'), // e1, oldest
+      row(1, '2026-08-29T10:01:00Z'), // e2
+      row(1, '2026-08-29T10:02:00Z'), // e3, newest
+    ]);
+
+    const page1 = await request(app.getHttpServer()).get('/v1/events?device_id=1&limit=2');
+    expect(page1.status).toBe(200);
+    expect(page1.body.events.map((e: { timestamp: string }) => e.timestamp)).toEqual([
+      '2026-08-29T10:02:00.000Z',
+      '2026-08-29T10:01:00.000Z',
+    ]);
+    expect(page1.body.next_cursor).not.toBeNull();
+
+    // Late-arriving insert: lands strictly between the cursor and page 1's
+    // already-returned upper bound -- inside the already-paginated region.
+    await repository.insertEvents([row(1, '2026-08-29T10:01:30Z')]);
+
+    const page2 = await request(app.getHttpServer()).get(
+      `/v1/events?device_id=1&limit=2&cursor=${encodeURIComponent(page1.body.next_cursor)}`,
+    );
+    expect(page2.status).toBe(200);
+    expect(page2.body.events.map((e: { timestamp: string }) => e.timestamp)).toEqual([
+      '2026-08-29T10:00:00.000Z',
+    ]);
+    expect(page2.body.next_cursor).toBeNull();
+  });
+
   it('respects from/to bounds end to end', async () => {
     await repository.insertEvents([
       row(1, '2026-08-29T09:00:00Z'),

@@ -6,5 +6,18 @@
 -- backward as well as forward, so a single (device_id, timestamp, id) index
 -- covers "WHERE device_id = ? ORDER BY timestamp DESC, id DESC" and its
 -- ascending counterpart without needing a second, differently-ordered index.
+-- LOCKING NOTE: this is a plain CREATE INDEX, which takes a lock that blocks
+-- all inserts to `events` for the duration of the build. That is fine for
+-- the current empty/small dev and CI tables, but is directly at odds with
+-- this phase's premise of continuous concurrent ingest once real data
+-- volume exists. Before running this migration against a live table under
+-- production ingest load: switch to CREATE INDEX CONCURRENTLY, and first add
+-- invalid-index detection/recovery to backend/scripts/migrate.js -- a failed
+-- CONCURRENTLY build leaves an INVALID index behind, and migrate.js has no
+-- tracking table (it re-applies every .sql file on every run), so a plain
+-- `IF NOT EXISTS` would match that INVALID index and silently skip it
+-- forever, permanently leaving a broken, planner-ignored index with no
+-- automatic recovery. Not fixed here: this project has no documented
+-- production deployment yet (see the design spec's Non-Goals).
 CREATE INDEX IF NOT EXISTS events_device_id_timestamp_id_idx
     ON events (device_id, timestamp, id);

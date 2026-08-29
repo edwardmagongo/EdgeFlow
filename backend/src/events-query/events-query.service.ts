@@ -44,7 +44,7 @@ export class EventsQueryService {
       throw new BadRequestException('device_id is required');
     }
     const deviceId = Number(value);
-    if (!Number.isFinite(deviceId) || !Number.isInteger(deviceId)) {
+    if (!Number.isSafeInteger(deviceId)) {
       throw new BadRequestException('device_id must be an integer');
     }
     return deviceId;
