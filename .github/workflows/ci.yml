@@ -72,6 +72,10 @@ jobs:
         working-directory: backend
         run: npm ci
 
+      - name: Migrate
+        working-directory: backend
+        run: npm run migrate
+
       - name: Test
         working-directory: backend
         run: npm test

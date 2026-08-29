@@ -1,15 +1,28 @@
 # Local PostgreSQL and Redis for backend development and tests. CI uses
-# GitHub Actions services: containers with the same images and credentials, so
-# the two environments behave identically.
+# GitHub Actions services: containers with the same images and credentials on
+# their default ports, so the two environments behave identically apart from
+# the host port mapping and postgres image variant below.
+#
+# Host ports are non-default (5433, 6380) because this machine already runs
+# unrelated postgres/redis containers bound to 5432/6379. Only the host side
+# of the mapping changes; the containers still listen on 5432/6379
+# internally, matching CI. Set DATABASE_URL/REDIS_URL accordingly, e.g.:
+#   DATABASE_URL=postgres://edgeflow:edgeflow@localhost:5433/edgeflow
+#   REDIS_URL=redis://localhost:6380
+#
+# postgres:16-alpine (not postgres:16) here only: it was already cached
+# locally, where postgres:16 was not and a slow pull stalled local
+# verification. Same PostgreSQL 16 server; CI still uses postgres:16 on a
+# fast runner, so this is a local-only substitution.
 services:
   postgres:
-    image: postgres:16
+    image: postgres:16-alpine
     environment:
       POSTGRES_USER: edgeflow
       POSTGRES_PASSWORD: edgeflow
       POSTGRES_DB: edgeflow
     ports:
-      - "5432:5432"
+      - "5433:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U edgeflow"]
       interval: 2s
@@ -19,7 +32,7 @@ services:
   redis:
     image: redis:7
     ports:
-      - "6379:6379"
+      - "6380:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 2s
