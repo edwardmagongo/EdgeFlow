@@ -88,7 +88,10 @@ def run_rung(gateway_bin, simulator_bin, sink_file, target, queue, *,
         "queue_capacity": queue_capacity, "error": "",
     }
 
-    sink_file.unlink(missing_ok=True)
+    # Only regular files are removed between runs. The disk-isolation control
+    # points the sink at /dev/null, which exists and must not be unlinked.
+    if sink_file.is_file():
+        sink_file.unlink()
     gateway = subprocess.Popen(
         [str(gateway_bin), f"--port={port}", f"--queue-capacity={queue_capacity}",
          "--workers=4", "--backpressure=block", f"--sink-file={sink_file}"],

@@ -69,47 +69,51 @@ means "at or below 100us", not "exactly 100us".
 
 ## Benchmarks
 
-Real, measured numbers from `scripts/run_benchmarks.py` and
+Real, measured numbers from `scripts/run_benchmarks.py`,
+`scripts/run_saturation_sweep.py`, and
 `./build-release/benchmarks/edgeflow-benchmarks` -- see `docs/benchmarks.md`
-for the full results table. Apple M-series, 10 cores,
+and `docs/saturation.md` for the full tables. Apple M-series, 10 cores,
 `-DCMAKE_BUILD_TYPE=Release`, gateway and simulator sharing one machine.
-Micro-benchmarks are the median of 9 repetitions; macro rows are the median of
-3 full matrix runs.
+Micro-benchmarks are medians of 9 repetitions; macro rows medians of 3.
 
-- Peak observed throughput: 23,800 events/sec sustained over 10s (500 devices
-  x 50 events/sec, 4 workers, queue capacity 64, `--backpressure=block`), with
-  zero dropped and zero malformed events.
+### Gateway saturation (Phase 4)
+
+**The gateway has never been made to drop an event.** Across a ladder of
+offered rates from 25,000 to 800,000 events/sec, against both queue
+implementations, every rung reported zero drops and `accepted == sent`
+exactly. Peak observed: **462,163 events/sec accepted with nothing dropped**.
+
+The load generator is the bottleneck at every rung above 50,000 events/sec,
+not the gateway. Phase 4 cut the simulator's per-event cost (caching the ISO
+timestamp: 4.65 -> 4.00 us/event) and added `--threads=N` to shard the fleet
+across io_context threads, and it is still the limiting factor. The gateway's
+ceiling remains **unknown and above 462,000 events/sec** -- it is a lower
+bound, not a measurement of the gateway.
+
+The disk is ruled out as the constraint: re-running the whole ladder with
+`--sink-file=/dev/null` changed accepted throughput by under 5% on nine of
+twelve rungs and produced zero drops either way.
+
+One artefact worth knowing: the 800,000/sec rungs achieve *less* than the
+400,000/sec rungs (~60,000 vs ~460,000). `DeviceClient` computes its send
+interval as `1000 / events_per_second` truncated to whole milliseconds, so
+per-device rates above 500/sec collapse onto a 1 ms interval and the fleet
+stops scaling. That is a load-generator limitation, not a gateway one.
+
+### Queue comparison (Phase 3, unchanged by Phase 4)
+
 - SPMC micro-benchmark (one producer, N consumers -- the shape the gateway
   actually has): mutex 82.2 / 158 / 289 / 1308 ns per push at 1/2/4/8
   consumers, lock-free 53.2 / 53.1 / 138 / 205 ns. The lock-free queue is
-  1.6x faster at one consumer and 6.4x faster at eight; the mutex queue
-  degrades sharply past four consumers while the lock-free one stays flat.
-- End-to-end across the full macro matrix, the two queues differed by less
-  than 2.5% on throughput in every row -- a null result, and the expected one.
-  The pipeline is offered-load-limited, not queue-limited: 200 devices x 10
-  events/sec offers 2,000 events/sec and both queues accept ~1,960 of them
-  with zero drops. No queue implementation can raise a ceiling the simulator
-  sets.
-- The lock-free queue showed *higher* mean queue-wait latency in most macro
-  rows. The direction was consistent, but run-to-run magnitudes varied by up
-  to 17x, so it is reported as a direction and not quantified. The mechanism
-  is that at these loads the queue is empty almost always, so nearly every
-  event pays the park/wake path rather than the lock-free fast path: the mutex
-  queue notifies under the very mutex its consumer waits on, while the
-  lock-free queue must fence, read its waiter count, and then take that mutex
-  anyway -- strictly more work when there is never a backlog to absorb.
-- Worker count still makes no difference to throughput, for the same
-  offered-load reason: 1, 2, 4 and 8 workers all land at ~1,960 events/sec.
-- Chaos scenarios behave identically on both queues: 20% packet loss and the
-  +100-device spike move throughput by the same amount either way.
+  1.6x faster at one consumer and 6.4x at eight.
+- End-to-end the two remain indistinguishable, and Phase 4 did **not** settle
+  the question it set out to settle: since the gateway never saturates, the
+  regime where the queue could matter is still out of reach. `BoundedQueue`
+  (mutex) stays the production default, now for a measured reason rather than
+  an assumed one.
 
-**Conclusion: `BoundedQueue` (mutex) stays the production default.** The
-lock-free queue is decisively faster under saturation, and the gateway never
-reaches saturation. `LockFreeBoundedQueue` is kept, tested and benchmarked so
-the choice can be revisited if a future phase raises the offered load past the
-point where the queue becomes the bottleneck.
-
-Reproduce: build with `-DCMAKE_BUILD_TYPE=Release`, then run
-`python3 scripts/run_benchmarks.py --build-dir build-release` (several minutes)
-and `./build-release/benchmarks/edgeflow-benchmarks --benchmark_repetitions=9
---benchmark_report_aggregates_only=true`.
+Reproduce: build with `-DCMAKE_BUILD_TYPE=Release`, then
+`python3 scripts/run_saturation_sweep.py --build-dir build-release`
+(around ten minutes) and `python3 scripts/run_benchmarks.py --build-dir build-release`.
+Run them on an otherwise idle machine -- throughput here swings several-fold
+with background load.
