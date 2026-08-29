@@ -18,6 +18,12 @@ edgeflow::BackpressurePolicy parse_policy(std::string_view value) {
 
 } // namespace
 
+SinkKind parse_sink_kind(std::string_view value) {
+    if (value == "file") return SinkKind::File;
+    if (value == "http") return SinkKind::Http;
+    throw std::invalid_argument("--sink must be file or http, got: " + std::string(value));
+}
+
 Config parse_args(int argc, char** argv) {
     Config config;
     for (int i = 1; i < argc; ++i) {
@@ -37,6 +43,24 @@ Config parse_args(int argc, char** argv) {
                 edgeflow::parse_positive_size(edgeflow::arg_value(arg), "--batch-age-ms"));
         } else if (arg.starts_with("--sink-file=")) {
             config.sink_file = std::string(edgeflow::arg_value(arg));
+        } else if (arg.starts_with("--sink=")) {
+            config.sink_kind = parse_sink_kind(edgeflow::arg_value(arg));
+        } else if (arg.starts_with("--sink-url=")) {
+            config.sink_url = std::string(edgeflow::arg_value(arg));
+        } else if (arg.starts_with("--sink-outbound-capacity=")) {
+            config.sink_outbound_capacity = edgeflow::parse_positive_size(
+                edgeflow::arg_value(arg), "--sink-outbound-capacity");
+        } else if (arg.starts_with("--sink-backpressure=")) {
+            config.sink_backpressure = parse_policy(edgeflow::arg_value(arg));
+        } else if (arg.starts_with("--sink-max-retries=")) {
+            config.sink_max_retries =
+                edgeflow::parse_positive_size(edgeflow::arg_value(arg), "--sink-max-retries");
+        } else if (arg.starts_with("--sink-backoff-ms=")) {
+            config.sink_backoff_ms = std::chrono::milliseconds(
+                edgeflow::parse_positive_size(edgeflow::arg_value(arg), "--sink-backoff-ms"));
+        } else if (arg.starts_with("--sink-timeout-ms=")) {
+            config.sink_timeout_ms = std::chrono::milliseconds(
+                edgeflow::parse_positive_size(edgeflow::arg_value(arg), "--sink-timeout-ms"));
         } else {
             throw std::invalid_argument("unknown argument: " + std::string(arg));
         }
@@ -47,6 +71,12 @@ Config parse_args(int argc, char** argv) {
     }
     if (config.queue_capacity == 0) {
         throw std::invalid_argument("--queue-capacity must be at least 1");
+    }
+    if (config.sink_kind == SinkKind::Http && config.sink_url.empty()) {
+        throw std::invalid_argument("--sink=http requires --sink-url");
+    }
+    if (config.sink_outbound_capacity == 0) {
+        throw std::invalid_argument("--sink-outbound-capacity must be at least 1");
     }
     return config;
 }

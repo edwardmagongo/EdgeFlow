@@ -1,11 +1,13 @@
 #include <boost/asio.hpp>
 #include <condition_variable>
 #include <iostream>
+#include <memory>
 #include <mutex>
 #include <thread>
 #include "edgeflow/batcher.hpp"
 #include "edgeflow/file_sink.hpp"
 #include "edgeflow/gateway/config.hpp"
+#include "edgeflow/gateway/http_sink.hpp"
 #include "edgeflow/gateway/server.hpp"
 #include "edgeflow/stats.hpp"
 #include "edgeflow/timed_event.hpp"
@@ -37,10 +39,29 @@ int main(int argc, char** argv) {
 
     try {
         GatewayQueue queue(config.queue_capacity, config.backpressure);
-        edgeflow::FileSink sink(config.sink_file);
-        edgeflow::Batcher batcher(config.batch_size, config.batch_age,
-                                    [&sink](std::vector<edgeflow::Event> batch) { sink.consume(batch); });
+        // Stats is declared before the sink because HttpSink holds a reference
+        // to it.
         edgeflow::Stats stats;
+
+        // Runtime selection is fine here in a way it was not for the queue in
+        // Phase 3: Sink is already virtual, and this is one dispatch per BATCH,
+        // not per event.
+        std::unique_ptr<edgeflow::Sink> sink;
+        if (config.sink_kind == edgeflow::gateway::SinkKind::Http) {
+            edgeflow::gateway::HttpSink::Options sink_options;
+            sink_options.url = config.sink_url;
+            sink_options.outbound_capacity = config.sink_outbound_capacity;
+            sink_options.backpressure = config.sink_backpressure;
+            sink_options.max_retries = config.sink_max_retries;
+            sink_options.backoff_base = config.sink_backoff_ms;
+            sink_options.timeout = config.sink_timeout_ms;
+            sink = std::make_unique<edgeflow::gateway::HttpSink>(std::move(sink_options), stats);
+        } else {
+            sink = std::make_unique<edgeflow::FileSink>(config.sink_file);
+        }
+
+        edgeflow::Batcher batcher(config.batch_size, config.batch_age,
+                                    [&sink](std::vector<edgeflow::Event> batch) { sink->consume(batch); });
         edgeflow::WorkerPool pool(queue, batcher, stats, config.workers);
 
         boost::asio::io_context io_context;
@@ -95,10 +116,13 @@ int main(int argc, char** argv) {
         // rounds up to a power of two with a floor of 2, so the requested and actual
         // capacities can differ. A benchmark comparison has to report what the queue
         // actually holds, not what was asked for.
+        const char* sink_name =
+            config.sink_kind == edgeflow::gateway::SinkKind::Http ? "http" : "file";
         std::cout << "edgeflow-gateway listening on port " << config.port
                   << " (queue=" << kQueueName
                   << ", workers=" << config.workers
-                  << ", queue_capacity=" << queue.capacity() << ")\n";
+                  << ", queue_capacity=" << queue.capacity()
+                  << ", sink=" << sink_name << ")\n";
 
         io_context.run();
 
