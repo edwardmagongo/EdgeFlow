@@ -11,6 +11,7 @@ add_executable(edgeflow-tests
     test_args.cpp
     test_gateway_config.cpp
     test_simulator_config.cpp
+    test_simulator_threading.cpp
     test_stats.cpp
     test_device_client_integration.cpp
     test_timed_event.cpp
