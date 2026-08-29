@@ -1,3 +1,4 @@
 .worktrees/
 build*/
 __pycache__/
+.superpowers/
