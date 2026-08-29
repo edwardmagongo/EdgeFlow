@@ -177,3 +177,148 @@ TEST(HttpSink, SendsEachBatchAsItsOwnRequest) {
     EXPECT_EQ(server.request_count(), 3u);
     EXPECT_EQ(stats.snapshot().batches_sent, 3u);
 }
+
+TEST(HttpSink, RetriesAServerErrorThenSucceeds) {
+    StubHttpServer server;
+    server.script({{StubAction::ServerError, std::chrono::milliseconds(0)},
+                   {StubAction::Ok, std::chrono::milliseconds(0)}});
+    edgeflow::Stats stats;
+
+    {
+        auto options = options_for(server.port());
+        options.backoff_base = std::chrono::milliseconds(10);
+        HttpSink sink(options, stats);
+        sink.consume(sample_batch());
+        ASSERT_TRUE(wait_for_requests(server, 2));
+    }
+
+    auto snapshot = stats.snapshot();
+    EXPECT_EQ(snapshot.batches_sent, 1u);
+    EXPECT_EQ(snapshot.batches_retried, 1u) << "one retry attempt";
+    EXPECT_EQ(snapshot.batches_dropped_exhausted, 0u);
+}
+
+TEST(HttpSink, RetriesA429) {
+    StubHttpServer server;
+    server.script({{StubAction::TooManyRequests, std::chrono::milliseconds(0)},
+                   {StubAction::Ok, std::chrono::milliseconds(0)}});
+    edgeflow::Stats stats;
+
+    {
+        auto options = options_for(server.port());
+        options.backoff_base = std::chrono::milliseconds(10);
+        HttpSink sink(options, stats);
+        sink.consume(sample_batch());
+        ASSERT_TRUE(wait_for_requests(server, 2));
+    }
+
+    EXPECT_EQ(stats.snapshot().batches_sent, 1u);
+    EXPECT_EQ(stats.snapshot().batches_retried, 1u);
+}
+
+TEST(HttpSink, GivesUpAfterMaxRetriesAndCountsExhausted) {
+    StubHttpServer server;
+    server.script({{StubAction::ServerError, std::chrono::milliseconds(0)}}); // always 500
+    edgeflow::Stats stats;
+
+    {
+        auto options = options_for(server.port());
+        options.max_retries = 2;
+        options.backoff_base = std::chrono::milliseconds(10);
+        HttpSink sink(options, stats);
+        sink.consume(sample_batch());
+        // 1 initial attempt + 2 retries = 3 requests.
+        ASSERT_TRUE(wait_for_requests(server, 3));
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    }
+
+    auto snapshot = stats.snapshot();
+    EXPECT_EQ(server.request_count(), 3u) << "one initial attempt plus max_retries";
+    EXPECT_EQ(snapshot.batches_sent, 0u);
+    EXPECT_EQ(snapshot.batches_retried, 2u);
+    EXPECT_EQ(snapshot.batches_dropped_exhausted, 1u);
+}
+
+TEST(HttpSink, DoesNotRetryA400) {
+    // A malformed request will still be malformed on the third attempt.
+    StubHttpServer server;
+    server.script({{StubAction::BadRequest, std::chrono::milliseconds(0)}});
+    edgeflow::Stats stats;
+
+    {
+        auto options = options_for(server.port());
+        options.max_retries = 3;
+        options.backoff_base = std::chrono::milliseconds(10);
+        HttpSink sink(options, stats);
+        sink.consume(sample_batch());
+        ASSERT_TRUE(wait_for_requests(server, 1));
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    }
+
+    auto snapshot = stats.snapshot();
+    EXPECT_EQ(server.request_count(), 1u) << "4xx must not be retried";
+    EXPECT_EQ(snapshot.batches_retried, 0u);
+    EXPECT_EQ(snapshot.batches_dropped_exhausted, 1u);
+}
+
+TEST(HttpSink, DoesNotFollowRedirects) {
+    // Re-POSTing telemetry to an unconfigured host would be worse than failing.
+    StubHttpServer server;
+    server.script({{StubAction::Redirect, std::chrono::milliseconds(0)}});
+    edgeflow::Stats stats;
+
+    {
+        auto options = options_for(server.port());
+        options.backoff_base = std::chrono::milliseconds(10);
+        HttpSink sink(options, stats);
+        sink.consume(sample_batch());
+        ASSERT_TRUE(wait_for_requests(server, 1));
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    }
+
+    EXPECT_EQ(server.request_count(), 1u);
+    EXPECT_EQ(stats.snapshot().batches_sent, 0u);
+    EXPECT_EQ(stats.snapshot().batches_dropped_exhausted, 1u);
+}
+
+TEST(HttpSink, RetriesATransportFailure) {
+    // The server hangs up without replying: retryable, like a reset connection.
+    StubHttpServer server;
+    server.script({{StubAction::CloseWithoutReply, std::chrono::milliseconds(0)},
+                   {StubAction::Ok, std::chrono::milliseconds(0)}});
+    edgeflow::Stats stats;
+
+    {
+        auto options = options_for(server.port());
+        options.backoff_base = std::chrono::milliseconds(10);
+        HttpSink sink(options, stats);
+        sink.consume(sample_batch());
+        ASSERT_TRUE(wait_for_requests(server, 2));
+    }
+
+    EXPECT_EQ(stats.snapshot().batches_sent, 1u);
+    EXPECT_EQ(stats.snapshot().batches_retried, 1u);
+}
+
+TEST(HttpSink, BackoffGrowsBetweenAttempts) {
+    // Three failing attempts at a 40ms base must wait at least 40 + 80 = 120ms
+    // in total. Asserting a lower bound only: scheduling jitter can make it
+    // longer, never shorter.
+    StubHttpServer server;
+    server.script({{StubAction::ServerError, std::chrono::milliseconds(0)}});
+    edgeflow::Stats stats;
+
+    const auto started = std::chrono::steady_clock::now();
+    {
+        auto options = options_for(server.port());
+        options.max_retries = 2;
+        options.backoff_base = std::chrono::milliseconds(40);
+        HttpSink sink(options, stats);
+        sink.consume(sample_batch());
+        ASSERT_TRUE(wait_for_requests(server, 3));
+    }
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+
+    EXPECT_GE(elapsed, std::chrono::milliseconds(120))
+        << "backoff does not appear to be growing between attempts";
+}

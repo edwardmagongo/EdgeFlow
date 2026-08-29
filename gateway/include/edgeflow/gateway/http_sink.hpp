@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <random>
 #include <string>
 #include <thread>
 #include <vector>
@@ -62,7 +63,17 @@ public:
 
 private:
     void run();                                  // sink thread body
-    bool send_once(const std::string& body);     // one round trip; true on 2xx
+    // What a single round trip tells us to do next.
+    enum class SendOutcome {
+        Success,           // 2xx
+        RetryableFailure,  // transport error, 5xx, or 429 -- may clear on its own
+        PermanentFailure,  // 4xx other than 429, or 3xx -- will not improve
+    };
+
+    SendOutcome send_once(const std::string& body);
+    // Runs send_once up to 1 + options_.max_retries times, backing off between
+    // attempts. Returns true if the batch was delivered.
+    bool send_with_retries(const std::string& body);
 
     // Split from the URL once at construction so the send path does no parsing.
     struct Target {
@@ -76,6 +87,9 @@ private:
     Target target_;
     edgeflow::Stats& stats_;
     edgeflow::BoundedQueue<std::string> outbound_;
+    // Jitter source for backoff. Only the sink thread touches it, so it needs
+    // no synchronisation.
+    std::mt19937 jitter_rng_{std::random_device{}()};
     std::thread thread_;
     bool stopped_ = false;
 };
