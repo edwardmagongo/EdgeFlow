@@ -142,8 +142,13 @@ describe('POST /v1/events', () => {
 
   it('still stores rows when Redis is unavailable', async () => {
     // Fail open: a cache outage must not become telemetry loss. The service
-    // returns 'unavailable', the endpoint ingests anyway, and the counter is
-    // what makes the unprotected window auditable afterwards.
+    // returns 'unavailable' and the endpoint ingests anyway. This test mocks
+    // the entire claim() method, which bypasses its real body -- including
+    // the redis_unavailable increment that lives inside it -- so it proves
+    // only IngestService's own fail-open storage behaviour, not the counter.
+    // The counter itself is proven directly, against a genuinely unreachable
+    // Redis instance, by "fails open when Redis is unreachable" in
+    // idempotency.service.spec.ts.
     const idempotency = app.get(IdempotencyService);
     jest.spyOn(idempotency, 'claim').mockResolvedValueOnce('unavailable');
 
@@ -156,9 +161,6 @@ describe('POST /v1/events', () => {
 
     expect(response.body.stored).toBe(6);
     expect(await storedCount()).toBe(6);
-
-    const health = await request(app.getHttpServer()).get('/v1/health').expect(200);
-    expect(health.body.counters.redis_unavailable).toBeGreaterThan(0);
   });
 
   it('returns 503, not 500, when the database fails', async () => {

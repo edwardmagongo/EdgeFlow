@@ -35,16 +35,12 @@ export class IngestService {
         this.metrics.increment('batches_duplicate_suppressed');
         return { received, stored: 0, skipped, duplicate: true };
       }
-      // 'unavailable' falls through and ingests without protection. Count it
-      // here rather than relying solely on IdempotencyService's own internal
-      // increment: that increment lives inside claim()'s body, so a caller
-      // that substitutes a fake claim() (as the fail-open test does) would
-      // otherwise see no counter movement even though the endpoint genuinely
-      // ran unprotected. Real Redis outages may now increment this counter
-      // from both sites; no test relies on an exact count, only >0.
-      if (claim === 'unavailable') {
-        this.metrics.increment('redis_unavailable');
-      }
+      // 'unavailable' falls through and ingests without protection.
+      // IdempotencyService.claim() already increments redis_unavailable
+      // internally -- it's the component that actually knows when Redis is
+      // down, so that's the single place this metric is counted. Do not
+      // increment it again here; doing so would double-count every real
+      // outage.
     }
 
     if (skipped > 0) {

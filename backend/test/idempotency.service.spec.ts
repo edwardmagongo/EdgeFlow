@@ -52,7 +52,12 @@ describe('IdempotencyService', () => {
   });
 
   it('fails open when Redis is unreachable', async () => {
-    // A port nothing is listening on stands in for an outage.
+    // A port nothing is listening on stands in for an outage. This exercises
+    // claim()'s real body (not a mock of the method), so it is the test that
+    // proves redis_unavailable is incremented by the one call site that
+    // should own it: IdempotencyService.claim() itself. `metrics` is a fresh
+    // MetricsService for this test (see beforeEach), so a single claim()
+    // call must move the counter by exactly 1 -- not 0, and not more than 1.
     const offline = new IdempotencyService(metrics, {
       redisUrl: 'redis://127.0.0.1:6390',
       idempotencyTtlSeconds: 900,
@@ -60,7 +65,7 @@ describe('IdempotencyService', () => {
     await offline.connect(); // must not throw
 
     expect(await offline.claim(uniqueKey())).toBe('unavailable');
-    expect(metrics.snapshot().redis_unavailable).toBeGreaterThan(0);
+    expect(metrics.snapshot().redis_unavailable).toBe(1);
     expect(await offline.isReachable()).toBe(false);
 
     await offline.onModuleDestroy();
