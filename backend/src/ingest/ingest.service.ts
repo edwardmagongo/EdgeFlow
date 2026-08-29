@@ -27,14 +27,26 @@ export class IngestService {
     const { valid, skipped } = parseNdjsonBatch(body);
     const received = valid.length + skipped;
 
+    // Set only when this request is the one holding the claim, so the catch
+    // below releases a key it actually took. A duplicate or an unavailable
+    // Redis leaves this undefined and releases nothing.
+    let claimedKey: string | undefined;
+
     if (idempotencyKey !== undefined && idempotencyKey.length > 0) {
       const claim = await this.idempotency.claim(idempotencyKey);
       if (claim === 'duplicate') {
         // Already durably stored by an earlier attempt. Reporting success is
         // correct: the sink's goal -- this batch is persisted -- is met.
+        //
+        // That premise only holds because a claim whose insert FAILED is
+        // released below. Without that release, this branch would also catch
+        // batches that were claimed but never stored, and answer 200 for data
+        // that does not exist -- the sink would treat the batch as delivered
+        // and drop it.
         this.metrics.increment('batches_duplicate_suppressed');
         return { received, stored: 0, skipped, duplicate: true };
       }
+      claimedKey = idempotencyKey;
       // 'unavailable' falls through and ingests without protection.
       // IdempotencyService.claim() already increments redis_unavailable
       // internally -- it's the component that actually knows when Redis is
@@ -53,6 +65,16 @@ export class IngestService {
       return { received, stored, skipped, duplicate: false };
     } catch (error) {
       this.metrics.increment('db_failures');
+      // Undo the claim: this batch was NOT stored, so the sink's retry must be
+      // a real retry rather than one suppressed as an already-stored
+      // duplicate. Claiming stays BEFORE the insert -- that is what closes the
+      // window where a retry arriving mid-insert would store the batch twice
+      // -- and the key is only given back once the insert has definitively
+      // failed. release() never throws, so it cannot mask the database error
+      // being rethrown here as a 503.
+      if (claimedKey !== undefined) {
+        await this.idempotency.release(claimedKey);
+      }
       throw error;
     }
   }

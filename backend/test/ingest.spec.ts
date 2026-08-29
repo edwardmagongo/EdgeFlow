@@ -167,8 +167,13 @@ describe('POST /v1/events', () => {
     // 503 is what the sink treats as retryable alongside 429. A 4xx here would
     // permanently drop the batch; this test is what keeps that from regressing.
     const repository = app.get(EventsRepository);
-    const original = repository.insertEvents.bind(repository);
-    jest
+    // mockRestore() (not mockImplementation(original)) puts the real,
+    // unmocked method back on the property. Rebinding a snapshot of
+    // `repository.insertEvents` and reassigning it via mockImplementation
+    // leaves a mock function in place forever; a later test that spies on
+    // this same method again would capture a bound reference to that
+    // lingering mock rather than the true implementation.
+    const spy = jest
       .spyOn(repository, 'insertEvents')
       .mockRejectedValueOnce(new Error('connection terminated'));
 
@@ -179,7 +184,44 @@ describe('POST /v1/events', () => {
       .send(body(4))
       .expect(503);
 
-    jest.spyOn(repository, 'insertEvents').mockImplementation(original);
+    spy.mockRestore();
+  });
+
+  it('releases the key on a database failure so the retry actually stores data', async () => {
+    // The regression test for the data-loss defect: the idempotency key was
+    // being claimed before the insert and never released when the insert
+    // failed, so the sink's retry of the SAME batch with the SAME key hit
+    // claim() again, got 'duplicate', and the endpoint returned
+    // {"stored":0,"duplicate":true} with 200 -- the sink treats that as
+    // delivered and drops a batch that was never written. Before the fix,
+    // this test fails at the `retry.body` assertion below (200 still comes
+    // back, but with stored:0/duplicate:true instead of stored:4/
+    // duplicate:false), and storedCount() is 0.
+    const key = uniqueKey();
+    const payload = body(4);
+    const repository = app.get(EventsRepository);
+    const spy = jest
+      .spyOn(repository, 'insertEvents')
+      .mockRejectedValueOnce(new Error('connection terminated'));
+
+    await request(app.getHttpServer())
+      .post('/v1/events')
+      .set('Content-Type', NDJSON)
+      .set('Idempotency-Key', key)
+      .send(payload)
+      .expect(503);
+
+    spy.mockRestore();
+
+    const retry = await request(app.getHttpServer())
+      .post('/v1/events')
+      .set('Content-Type', NDJSON)
+      .set('Idempotency-Key', key)
+      .send(payload)
+      .expect(200);
+
+    expect(retry.body).toMatchObject({ stored: 4, duplicate: false });
+    expect(await storedCount()).toBe(4);
   });
 
   it('counts what it did on the health endpoint', async () => {

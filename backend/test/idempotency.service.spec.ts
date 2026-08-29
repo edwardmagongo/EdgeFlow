@@ -51,6 +51,35 @@ describe('IdempotencyService', () => {
     expect(await service.isReachable()).toBe(true);
   });
 
+  it('makes a claimed key claimable again after release', async () => {
+    // This is the regression test for the ingest data-loss defect: release()
+    // is what undoes a claim() when the insert it was guarding fails, so a
+    // retry with the same key is a genuine retry rather than a suppressed
+    // duplicate.
+    const key = uniqueKey();
+    expect(await service.claim(key)).toBe('claimed');
+    expect(await service.claim(key)).toBe('duplicate');
+
+    await service.release(key);
+
+    expect(await service.claim(key)).toBe('claimed');
+  });
+
+  it('does not throw when releasing against an unreachable Redis', async () => {
+    // release() is called from IngestService's catch block, which must not
+    // let a release failure mask the original database error. It has to be
+    // safe to call even when there is no client to talk to.
+    const offline = new IdempotencyService(metrics, {
+      redisUrl: 'redis://127.0.0.1:6390',
+      idempotencyTtlSeconds: 900,
+    });
+    await offline.connect(); // must not throw
+
+    await expect(offline.release(uniqueKey())).resolves.toBeUndefined();
+
+    await offline.onModuleDestroy();
+  });
+
   it('fails open when Redis is unreachable', async () => {
     // A port nothing is listening on stands in for an outage. This exercises
     // claim()'s real body (not a mock of the method), so it is the test that

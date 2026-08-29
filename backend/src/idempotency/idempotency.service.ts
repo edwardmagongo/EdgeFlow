@@ -73,6 +73,26 @@ export class IdempotencyService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+  // Deletes the key so a later claim() of it is not treated as a duplicate.
+  // Used to undo a claim() when the insert it was guarding fails, so the
+  // sink's retry is a genuine retry rather than one silently suppressed as
+  // already-stored. Best-effort, like claim(): an absent or unreachable
+  // client is tolerated rather than thrown -- the caller (IngestService)
+  // must not let a failed release mask the original database error, so this
+  // method never surfaces one of its own.
+  async release(key: string): Promise<void> {
+    if (this.client === null || !this.client.isOpen) {
+      return;
+    }
+    try {
+      await this.client.del(key);
+    } catch {
+      // Swallow. Worst case the key simply lives out its TTL and the next
+      // retry is suppressed as a duplicate instead of released -- survivable,
+      // unlike surfacing this error in place of the real 503 cause.
+    }
+  }
+
   async isReachable(): Promise<boolean> {
     if (this.client === null || !this.client.isOpen) return false;
     try {
