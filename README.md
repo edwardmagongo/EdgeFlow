@@ -3,11 +3,16 @@
 A concurrent C++20 telemetry pipeline: simulated devices → TCP gateway →
 bounded queue → worker pool → batcher → sink.
 
-Phases 1-3 have landed: the C++ core pipeline with a file-backed sink
-(Phase 1), a benchmark suite and simulator chaos scenarios (Phase 2), and a
-lock-free queue variant benchmarked against the mutex one (Phase 3). No cloud
-backend, database, or dashboard yet. Each phase has its own spec under
-`docs/superpowers/specs/`.
+Phases 1-5 have landed: the C++ core pipeline with a file-backed sink
+(Phase 1), a benchmark suite and simulator chaos scenarios (Phase 2), a
+lock-free queue variant benchmarked against the mutex one (Phase 3), a
+saturating load generator that located the gateway's throughput knee
+(Phase 4), and an HTTP sink that POSTs NDJSON batches to a backend endpoint
+(Phase 5). The HTTP sink talks to any endpoint you point it at, but there is
+still no cloud backend, database, or dashboard in this repository. Each phase
+has its own spec under `docs/superpowers/specs/` and a plan under
+`docs/superpowers/plans/`; Phases 2-5 also have a task-by-task execution log
+under `docs/superpowers/progress/`.
 
 ## Build
 
