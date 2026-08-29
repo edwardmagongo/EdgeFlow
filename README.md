@@ -112,8 +112,15 @@ HTTP sink mints one per batch) and replies with the per-batch outcome:
 
 Invalid lines are skipped individually rather than failing the batch. If
 PostgreSQL is unreachable the endpoint returns **503**, never a 4xx, so the
-sink's retry and outbound queue absorb the outage instead of discarding the
-batch permanently.
+sink retries rather than discarding the batch on the spot. See the known defect
+under Benchmarks below: the retry itself is currently suppressed as a duplicate,
+so an outage still loses the batch.
+
+If Redis is unreachable the idempotency check fails open -- the batch is stored
+rather than rejected, on the reasoning that losing telemetry is worse than
+storing it twice. A Redis outage concurrent with a sink retry therefore admits
+duplicate rows by design, and the only record that it happened is the
+`redis_unavailable` counter.
 
 On shutdown (SIGINT/SIGTERM), the gateway prints its observability counters:
 accepted, dropped_oldest, dropped_newest, and malformed event counts, plus
@@ -159,6 +166,16 @@ events in PostgreSQL, with Redis holding batch-level idempotency keys:
   accepted by the gateway produced exactly 294,064 rows, with zero batches
   retried, dropped, or malformed.
 - Replaying a batch with the same `Idempotency-Key` stores it once.
+
+**Known defect: a batch retried after a database outage is silently lost.** The
+idempotency key is claimed before the insert and is not released if the insert
+fails, so the sequence 503 -> sink retries -> `{"stored":0,"duplicate":true}` ->
+sink sees 2xx and drops the batch writes nothing, while both sides report
+success. Measured: with PostgreSQL stopped for ~8s during a 30s run, the gateway
+reported `batches_retried=66` and `batches_dropped_exhausted=0` while
+`batches_duplicate_suppressed` rose by exactly 66 and ~6,600 events never
+landed. The 503 path is therefore not yet the durability guarantee it is meant
+to be, and this is the first thing to fix in this area.
 
 **PostgreSQL is now the pipeline's narrowest point, by roughly 8.6x.** The
 gateway ingests about 200,000 events/sec (Phase 4) and this path commits about
