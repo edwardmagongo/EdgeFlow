@@ -32,6 +32,11 @@ public:
     // owning io_context thread; read after that thread has finished.
     std::uint64_t events_sent() const { return events_sent_; }
 
+    // Exposed for testing: the interval is derived from events_per_second and
+    // is the one piece of construction-time arithmetic worth asserting on
+    // directly, rather than inferring from timing-sensitive send counts.
+    std::chrono::microseconds send_interval() const { return send_interval_; }
+
 private:
     void connect();
     void schedule_next_send();
@@ -46,7 +51,7 @@ private:
     std::string host_;
     std::uint16_t port_;
     std::int64_t device_id_;
-    std::chrono::milliseconds send_interval_;
+    std::chrono::microseconds send_interval_;
     std::chrono::milliseconds chaos_latency_;
     double chaos_packet_loss_percent_;
     // One per client. DeviceClient is not shared across io_context threads, so

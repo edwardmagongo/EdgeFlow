@@ -1,5 +1,6 @@
 #include "edgeflow/simulator/device_client.hpp"
 #include <algorithm>
+#include <cstdint>
 #include <ctime>
 #include "edgeflow/event.hpp"
 
@@ -21,13 +22,19 @@ DeviceClient::DeviceClient(boost::asio::io_context& io_context,
       host_(host),
       port_(port),
       device_id_(device_id),
-      // Clamp the interval in double space before casting to long: for a
-      // tiny events_per_second (e.g. 1e-300), 1000.0/events_per_second is
-      // +inf, and casting an out-of-range double to long is undefined
-      // behavior. Clamping first guarantees the cast operand is always
-      // in-range (1 to 3,600,000).
-      send_interval_(std::chrono::milliseconds(
-          static_cast<long>(std::clamp(1000.0 / events_per_second, 1.0, 3'600'000.0)))),
+      // Microseconds, not milliseconds: at millisecond resolution any rate
+      // that does not divide 1000 evenly was silently rounded to a different
+      // rate, always upwards (truncating an interval shortens it). 400/sec
+      // became 500/sec and 800/sec became 1000/sec, which capped the whole
+      // fleet near 500,000 events/sec however many threads it had.
+      //
+      // Clamp in double space before casting: for a tiny events_per_second
+      // (e.g. 1e-300) 1e6/events_per_second is +inf, and casting an
+      // out-of-range double to an integer is undefined behavior. Clamping
+      // first keeps the cast operand in range (1us to 1 hour).
+      send_interval_(std::chrono::microseconds(
+          static_cast<std::int64_t>(std::clamp(1'000'000.0 / events_per_second,
+                                               1.0, 3'600'000'000.0)))),
       chaos_latency_(chaos_latency),
       chaos_packet_loss_percent_(chaos_packet_loss_percent),
       chaos_rng_(static_cast<std::mt19937::result_type>(device_id)) {}
