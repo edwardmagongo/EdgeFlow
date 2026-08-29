@@ -118,11 +118,18 @@ int main(int argc, char** argv) {
         // actually holds, not what was asked for.
         const char* sink_name =
             config.sink_kind == edgeflow::gateway::SinkKind::Http ? "http" : "file";
+        // Flushed explicitly (not just "\n"): stdout is fully buffered rather
+        // than line-buffered once it isn't a TTY, which is exactly the case
+        // when a parent process spawns this binary with a piped stdout. Without
+        // an explicit flush this line sits in libc's buffer until the process
+        // exits, so anything (e.g. a test harness) trying to use this line as a
+        // "the gateway is now accepting connections" signal would never see it
+        // until shutdown -- long after the signal was needed.
         std::cout << "edgeflow-gateway listening on port " << config.port
                   << " (queue=" << kQueueName
                   << ", workers=" << config.workers
                   << ", queue_capacity=" << queue.capacity()
-                  << ", sink=" << sink_name << ")\n";
+                  << ", sink=" << sink_name << ")" << std::endl;
 
         io_context.run();
 

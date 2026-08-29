@@ -29,6 +29,31 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+// Polls `getOutput()` until it contains `substring`, instead of assuming a
+// fixed delay is enough for the gateway to bind its listening socket. A fixed
+// sleep races the gateway's startup against Jest's own timers: under cold-start
+// contention (fresh ts-jest compile, freshly-built C++ binary) the gateway can
+// still not be listening once the sleep elapses, and since the simulator's
+// device client does a single-shot connect with no retry, that race is
+// all-or-nothing -- every device fails to connect and `accepted=0`.
+async function waitForOutput(
+  getOutput: () => string,
+  substring: string,
+  timeoutMs: number,
+): Promise<void> {
+  const pollIntervalMs = 25;
+  const deadline = Date.now() + timeoutMs;
+  while (!getOutput().includes(substring)) {
+    if (Date.now() >= deadline) {
+      throw new Error(
+        `gateway did not report "${substring}" within ${timeoutMs}ms; ` +
+          `captured stdout so far: ${JSON.stringify(getOutput())}`,
+      );
+    }
+    await sleep(pollIntervalMs);
+  }
+}
+
 describeOrSkip('gateway -> backend -> postgres', () => {
   let app: INestApplication;
   let pool: Pool;
@@ -68,7 +93,9 @@ describeOrSkip('gateway -> backend -> postgres', () => {
       gatewayOutput += String(chunk);
     });
 
-    await sleep(500); // let the gateway bind its port
+    // Wait for the gateway to actually report that it is listening, rather than
+    // assuming a fixed delay is enough (see waitForOutput above).
+    await waitForOutput(() => gatewayOutput, 'listening on port', 5000);
 
     const simulator = spawnSync(SIMULATOR, [
       `--port=${GATEWAY_PORT}`,
