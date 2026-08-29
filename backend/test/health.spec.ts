@@ -18,10 +18,11 @@ describe('GET /v1/health', () => {
     await app.close();
   });
 
-  it('reports ok and exposes every counter at zero', async () => {
+  it('reports ok, dependency reachability, and every counter at zero', async () => {
     const response = await request(app.getHttpServer()).get('/v1/health').expect(200);
 
     expect(response.body.status).toBe('ok');
+    expect(response.body.dependencies).toEqual({ database: true, redis: true });
     expect(response.body.counters).toEqual({
       batches_received: 0,
       batches_duplicate_suppressed: 0,

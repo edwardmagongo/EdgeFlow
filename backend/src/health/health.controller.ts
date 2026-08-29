@@ -1,15 +1,31 @@
-import { Controller, Get } from '@nestjs/common';
+import { Controller, Get, Inject } from '@nestjs/common';
+import { Pool } from 'pg';
+import { PG_POOL } from '../db/pool';
+import { IdempotencyService } from '../idempotency/idempotency.service';
 import { MetricsService } from '../metrics/metrics.service';
 
 @Controller('v1/health')
 export class HealthController {
-  constructor(private readonly metrics: MetricsService) {}
+  constructor(
+    private readonly metrics: MetricsService,
+    private readonly idempotency: IdempotencyService,
+    @Inject(PG_POOL) private readonly pool: Pool,
+  ) {}
 
-  // Counters plus liveness. Dependency reachability is added in Task 5, once
-  // there is a Redis client to ask; reporting it before then would be a
-  // hardcoded "ok", which is worse than not reporting it.
   @Get()
-  health() {
-    return { status: 'ok', counters: this.metrics.snapshot() };
+  async health() {
+    let database = false;
+    try {
+      await this.pool.query('SELECT 1');
+      database = true;
+    } catch {
+      database = false;
+    }
+
+    return {
+      status: 'ok',
+      dependencies: { database, redis: await this.idempotency.isReachable() },
+      counters: this.metrics.snapshot(),
+    };
   }
 }
