@@ -1,5 +1,6 @@
 add_library(edgeflow-gateway-lib
     src/config.cpp
+    src/http_sink.cpp
 )
 target_include_directories(edgeflow-gateway-lib PUBLIC include)
 target_link_libraries(edgeflow-gateway-lib PUBLIC

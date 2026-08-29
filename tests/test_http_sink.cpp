@@ -77,3 +77,103 @@ TEST(StubHttpServer, CloseWithoutReplyLooksLikeATransportFailure) {
     EXPECT_EQ(post(server.port(), "a\n"), 0u) << "expected no readable response";
     EXPECT_EQ(server.request_count(), 1u) << "the request should still have been read";
 }
+
+#include "edgeflow/file_sink.hpp"
+#include "edgeflow/gateway/http_sink.hpp"
+#include "edgeflow/stats.hpp"
+#include <cstdio>
+#include <fstream>
+#include <sstream>
+
+using edgeflow::Event;
+using edgeflow::gateway::HttpSink;
+
+namespace {
+
+std::vector<Event> sample_batch() {
+    return {
+        Event{1, "2026-08-28T00:00:00Z", 20.5, 90, 37.7749, -122.4194, "telemetry"},
+        Event{2, "2026-08-28T00:00:01Z", 21.5, 89, 37.7749, -122.4194, "telemetry"},
+    };
+}
+
+HttpSink::Options options_for(std::uint16_t port) {
+    HttpSink::Options options;
+    options.url = "http://127.0.0.1:" + std::to_string(port) + "/batches";
+    return options;
+}
+
+// Polls until the stub has seen `count` requests, or the deadline passes.
+bool wait_for_requests(const StubHttpServer& server, std::size_t count,
+                       std::chrono::milliseconds deadline = std::chrono::milliseconds(5000)) {
+    const auto until = std::chrono::steady_clock::now() + deadline;
+    while (std::chrono::steady_clock::now() < until) {
+        if (server.request_count() >= count) return true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    return false;
+}
+
+} // namespace
+
+TEST(HttpSink, PostsABatchAndCountsItSent) {
+    StubHttpServer server;
+    server.script({{StubAction::Ok, std::chrono::milliseconds(0)}});
+    edgeflow::Stats stats;
+
+    {
+        HttpSink sink(options_for(server.port()), stats);
+        sink.consume(sample_batch());
+        ASSERT_TRUE(wait_for_requests(server, 1));
+    }
+
+    EXPECT_EQ(server.request_count(), 1u);
+    EXPECT_EQ(server.content_types().at(0), "application/x-ndjson");
+    EXPECT_EQ(stats.snapshot().batches_sent, 1u);
+    EXPECT_EQ(stats.snapshot().batches_dropped_outbound, 0u);
+    EXPECT_EQ(stats.snapshot().batches_dropped_exhausted, 0u);
+}
+
+TEST(HttpSink, BodyIsByteIdenticalToFileSinkOutput) {
+    // The replay-with-curl property: a file written by FileSink can be POSTed
+    // to the backend unchanged, because both emit exactly the same bytes.
+    StubHttpServer server;
+    server.script({{StubAction::Ok, std::chrono::milliseconds(0)}});
+    edgeflow::Stats stats;
+    const auto batch = sample_batch();
+
+    const std::string path = "/tmp/edgeflow_http_sink_parity.ndjson";
+    std::remove(path.c_str());
+    {
+        edgeflow::FileSink file_sink(path);
+        file_sink.consume(batch);
+    }
+    std::ifstream stream(path);
+    std::stringstream file_bytes;
+    file_bytes << stream.rdbuf();
+
+    {
+        HttpSink sink(options_for(server.port()), stats);
+        sink.consume(batch);
+        ASSERT_TRUE(wait_for_requests(server, 1));
+    }
+
+    EXPECT_EQ(server.bodies().at(0), file_bytes.str());
+}
+
+TEST(HttpSink, SendsEachBatchAsItsOwnRequest) {
+    StubHttpServer server;
+    server.script({{StubAction::Ok, std::chrono::milliseconds(0)}});
+    edgeflow::Stats stats;
+
+    {
+        HttpSink sink(options_for(server.port()), stats);
+        sink.consume(sample_batch());
+        sink.consume(sample_batch());
+        sink.consume(sample_batch());
+        ASSERT_TRUE(wait_for_requests(server, 3));
+    }
+
+    EXPECT_EQ(server.request_count(), 3u);
+    EXPECT_EQ(stats.snapshot().batches_sent, 3u);
+}

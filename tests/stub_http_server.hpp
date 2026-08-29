@@ -77,9 +77,19 @@ public:
 
     void stop() {
         if (stopped_.exchange(true)) return;
-        boost::system::error_code ignored;
-        acceptor_.close(ignored);
-        io_context_.stop();
+        // Wake the blocking accept() by connecting to ourselves, so the serve
+        // thread notices stopped_ and closes the acceptor from the thread that
+        // owns it. Closing the acceptor from HERE races with accept() -- Asio
+        // sockets are not thread-safe, and TSan flags it.
+        try {
+            boost::asio::io_context poke_context;
+            tcp::socket poke(poke_context);
+            poke.connect(tcp::endpoint(boost::asio::ip::make_address("127.0.0.1"), port_));
+            boost::system::error_code ignored;
+            poke.close(ignored);
+        } catch (const std::exception&) {
+            // Already down; there is nothing to wake.
+        }
         if (thread_.joinable()) thread_.join();
     }
 
@@ -100,11 +110,13 @@ private:
     }
 
     void serve() {
-        while (!stopped_.load()) {
+        while (true) {
             boost::system::error_code error;
             tcp::socket socket(io_context_);
             acceptor_.accept(socket, error);
-            if (error) return; // acceptor closed by stop()
+            // Checked AFTER accept returns: stop() wakes us with a throwaway
+            // connection, which must not be treated as a real request.
+            if (error || stopped_.load()) break;
 
             beast::flat_buffer buffer;
             http::request<http::string_body> request;
@@ -135,6 +147,9 @@ private:
             http::write(socket, reply, error);
             socket.shutdown(tcp::socket::shutdown_both, error);
         }
+        // The acceptor is only ever closed by the thread that accepts on it.
+        boost::system::error_code ignored;
+        acceptor_.close(ignored);
     }
 
     static http::status status_for(StubAction action) {
