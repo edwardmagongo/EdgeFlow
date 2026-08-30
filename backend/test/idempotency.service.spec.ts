@@ -1,3 +1,4 @@
+import { execSync } from 'node:child_process';
 import { IdempotencyService } from '../src/idempotency/idempotency.service';
 import { MetricsService } from '../src/metrics/metrics.service';
 
@@ -187,5 +188,48 @@ describe('three-state claim', () => {
     await dead.connect();
     await expect(dead.markCommitted('anything')).resolves.toBeUndefined();
     await dead.onModuleDestroy();
+  });
+});
+
+describe('reconnect', () => {
+  // Restarting the container takes a few seconds; the default 5s timeout is
+  // not enough and a too-short timeout here would look like a code failure.
+  jest.setTimeout(60_000);
+
+  it('resumes deduplicating after Redis restarts, without a process restart', async () => {
+    const metrics = new MetricsService();
+    const service = new IdempotencyService(metrics, {
+      redisUrl: REDIS_URL,
+      idempotencyTtlSeconds: 900,
+      inFlightLeaseSeconds: 15,
+    });
+    await service.connect();
+
+    const before = `reconnect-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    expect(await service.claim(before)).toBe('claimed');
+
+    execSync('docker compose restart redis', {
+      cwd: `${__dirname}/../..`,
+      stdio: 'ignore',
+    });
+
+    // Poll rather than sleeping a fixed amount: how long the container takes
+    // to come back is not something this test should have to guess.
+    let recovered = false;
+    for (let attempt = 0; attempt < 60; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      if (await service.isReachable()) {
+        recovered = true;
+        break;
+      }
+    }
+    expect(recovered).toBe(true);
+
+    // The real assertion: claim() works again on the SAME service instance.
+    // With reconnectStrategy:false this stays 'unavailable' forever.
+    const after = `reconnect-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    expect(await service.claim(after)).toBe('claimed');
+
+    await service.onModuleDestroy();
   });
 });

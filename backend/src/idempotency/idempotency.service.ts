@@ -1,4 +1,4 @@
-import { Injectable, OnModuleDestroy, OnModuleInit, Optional } from '@nestjs/common';
+import { Injectable, Logger, OnModuleDestroy, OnModuleInit, Optional } from '@nestjs/common';
 import { createClient, RedisClientType } from 'redis';
 import { loadConfig } from '../config';
 import { MetricsService } from '../metrics/metrics.service';
@@ -30,9 +30,13 @@ const COMMITTED = 'committed';
 // constant here and not an environment variable.
 const IN_FLIGHT_LEASE_SECONDS = 15;
 
+
 @Injectable()
 export class IdempotencyService implements OnModuleInit, OnModuleDestroy {
   private client: RedisClientType | null = null;
+  private readonly logger = new Logger('IdempotencyService');
+  private disconnected = false;
+  private hasEverConnected = false;
 
   // `IdempotencyOptions` is an interface, so it has no runtime type for
   // Nest's DI to resolve: TypeScript's emitted design:paramtypes metadata
@@ -52,24 +56,70 @@ export class IdempotencyService implements OnModuleInit, OnModuleDestroy {
   }
 
   async connect(): Promise<void> {
-    // reconnectStrategy returning false stops node-redis retrying forever in
-    // the background, which would otherwise flood logs during an outage. A
-    // failed connection is not fatal: claim() degrades to 'unavailable'.
+    // A bounded backoff, not `false`. Returning false from reconnectStrategy
+    // makes node-redis give up permanently: after any Redis restart the client
+    // stays closed for the life of the process, every claim() returns
+    // 'unavailable', and deduplication is silently off until someone notices
+    // and restarts the service. The cap keeps a long outage from turning into
+    // a tight retry loop, which is what `false` was originally guarding
+    // against.
     const client = createClient({
       url: this.options.redisUrl,
-      socket: { reconnectStrategy: false, connectTimeout: 1000 },
+      socket: {
+        connectTimeout: 1000,
+        // Two regimes, because "never connected" and "lost the connection"
+        // deserve opposite answers.
+        //
+        // Before a first successful connection, give up after a couple of
+        // tries by returning an Error, which makes connect() reject. A bad URL
+        // or a Redis that simply is not there should fail fast at boot rather
+        // than leave connect() pending forever -- with a plain delay-returning
+        // strategy node-redis retries internally and the promise NEVER
+        // settles, which hangs startup and any test pointing at a dead port.
+        //
+        // After a successful connection, retry indefinitely with a capped
+        // backoff: that is the outage this phase exists to survive, and giving
+        // up there is exactly the `reconnectStrategy: false` bug being fixed.
+        reconnectStrategy: (retries: number) => {
+          if (!this.hasEverConnected) {
+            return retries >= 2 ? new Error('redis unreachable at startup') : 100;
+          }
+          return Math.min(50 * 2 ** Math.min(retries, 6), 2000);
+        },
+      },
     }) as RedisClientType;
 
-    // node-redis emits 'error' on connection loss; an unhandled 'error' event
-    // would crash the process, so it is swallowed here and surfaced through the
-    // redis_unavailable counter instead.
-    client.on('error', () => undefined);
+    // node-redis emits 'error' on every failed reconnect attempt, so logging
+    // each one would reproduce the flooding this used to avoid. Log the
+    // transition instead: one line when the connection drops, one when it
+    // returns. An unhandled 'error' event would still crash the process, so
+    // this handler must exist regardless of whether it logs.
+    client.on('error', () => {
+      if (!this.disconnected) {
+        this.disconnected = true;
+        this.logger.warn('redis connection lost; deduplication is failing open');
+      }
+    });
+    client.on('ready', () => {
+      this.hasEverConnected = true;
+      if (this.disconnected) {
+        this.disconnected = false;
+        this.logger.log('redis connection restored; deduplication resumed');
+      }
+    });
+
+    this.client = client;
 
     try {
       await client.connect();
-      this.client = client;
     } catch {
-      this.client = null;
+      // Reached only via the startup branch of reconnectStrategy above, which
+      // returns an Error rather than a delay. Not fatal: claim() degrades to
+      // 'unavailable' and the service still serves traffic.
+    }
+
+    if (!client.isOpen) {
+      this.logger.warn('redis unavailable at startup; will keep retrying');
     }
   }
 
@@ -168,8 +218,16 @@ export class IdempotencyService implements OnModuleInit, OnModuleDestroy {
   }
 
   async onModuleDestroy(): Promise<void> {
-    if (this.client !== null && this.client.isOpen) {
-      await this.client.quit().catch(() => undefined);
+    if (this.client !== null) {
+      if (this.client.isOpen) {
+        await this.client.quit().catch(() => undefined);
+      } else {
+        // A client that never connected is still retrying in the background.
+        // quit() only works on an open connection, so tearing it down needs
+        // disconnect(); without this the retry loop keeps the Node event loop
+        // alive and the process (or a test run) never exits.
+        this.client.disconnect().catch(() => undefined);
+      }
     }
     this.client = null;
   }
