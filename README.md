@@ -282,10 +282,33 @@ they are robust to that -- no rate is published from these runs).
 | `batches_dropped_exhausted` | 1 | 12 |
 | `batches_duplicate_suppressed` | 0 | 0 |
 
-The two columns exercise different code paths, which is the point: only the
-paused database produces in-flight rejections, and only the stopped one
-produces `db_failures`. A `stop`-based run would have come back green and
-proven nothing about this phase.
+The two columns exercise different code paths, which is the point. Under
+`pause` the inserts hang: `db_failures` is 0 and the in-flight path fires.
+Under `stop` they are killed outright: `db_failures` dominates. A `stop`-based
+run alone would have come back green and proven nothing about this phase.
+
+**Each scenario was then repeated three times** (four runs each including the
+above), with the conservation identities checked mechanically per run rather
+than by eye. All eight runs pass. The `pause` numbers are near-identical every
+time -- `batches_retried` 3, `batches_in_flight_rejected` 3,
+`batches_dropped_exhausted` 1 in all four -- so the mechanism is reproducible,
+not a one-off.
+
+The repetition corrected one claim this section previously made. `stop` is
+*not* purely a fast-failure mode: two of its four runs produced
+`batches_in_flight_rejected` of 2. `docker compose stop` sends SIGTERM and
+waits for a graceful exit, so there is a brief window in which connections hang
+before they die. The distinction that survives is the one that matters --
+`pause` yields 0 `db_failures` and a reliable 3 in-flight rejections, `stop`
+yields 21-50 `db_failures` and only incidental ones -- but "only `pause`
+produces in-flight rejections" was too strong and is withdrawn.
+
+Across all eight runs the arrival identity holds exactly:
+
+    batches_received = batches_sent + db_failures + batches_in_flight_rejected + T
+
+where `T` is the number of attempts that hung past the sink's timeout and
+committed anyway -- 1 in every `pause` run, 0 in every `stop` run.
 
 Nothing goes missing while both sides report success. Under `pause`, 148,267 -
 123,863 = 24,404 events were not stored, against 245 + 1 = 246 batches the
