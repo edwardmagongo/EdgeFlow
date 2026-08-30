@@ -106,15 +106,23 @@ HTTP sink mints one per batch) and replies with the per-batch outcome:
 
     {"received":5,"stored":5,"skipped":0,"duplicate":false}
 
-`GET /v1/health` reports dependency reachability and six counters:
-`batches_received`, `batches_duplicate_suppressed`, `events_stored`,
-`events_skipped_malformed`, `db_failures`, `redis_unavailable`.
+`GET /v1/health` reports dependency reachability and seven counters:
+`batches_received`, `batches_duplicate_suppressed`,
+`batches_in_flight_rejected`, `events_stored`, `events_skipped_malformed`,
+`db_failures`, `redis_unavailable`.
 
 Invalid lines are skipped individually rather than failing the batch. If
 PostgreSQL is unreachable the endpoint returns **503**, never a 4xx, so the
 sink retries rather than discarding the batch on the spot. A failed insert
 releases the batch's idempotency key, so that retry is a real retry rather than
 one suppressed as an already-stored duplicate.
+
+A key is only marked committed once its insert has committed, so
+`"duplicate":true` means the rows are durably stored. A retry that arrives
+while the first attempt is still inserting gets a **503** and is counted under
+`batches_in_flight_rejected`, rather than being told the batch was already
+stored -- storing it twice and dropping it entirely are both worse than asking
+the sink to come back.
 
 If Redis is unreachable the idempotency check fails open -- the batch is stored
 rather than rejected, on the reasoning that losing telemetry is worse than
@@ -188,14 +196,22 @@ vanishing while both sides report success. The re-run also exposed a crash:
 stopping PostgreSQL killed the backend outright via an unhandled `pg` client
 error (57P01) on a checked-out connection, which is now handled.
 
-**One narrower window remains open.** If the database fails *slowly* rather than
-fast -- a hung insert, a lock pile-up, a failover -- the sink's 5s timeout can
-fire while the first attempt is still inside its insert. The retry then finds
-the key still claimed, gets `{"stored":0,"duplicate":true}`, and drops the batch;
-the first attempt fails afterwards and releases a key nobody is waiting on.
-Closing that needs the claim to distinguish *in flight* from *committed* rather
-than being a single boolean, which is a design change beyond this phase. The
-measured 8s-outage scenario above is fixed; a multi-second hang is not.
+**The narrower window Phase 6 left open is closed in Phase 7.** If the database
+failed *slowly* rather than fast -- a hung insert, a lock pile-up, a failover --
+the sink's 5s timeout could fire while the first attempt was still inside its
+insert. The retry found the key still claimed, got
+`{"stored":0,"duplicate":true}`, and dropped the batch. Closing it needed the
+claim to distinguish *in flight* from *committed* rather than being a single
+boolean, which is exactly what Phase 6 deferred and Phase 7 built: one atomic
+`SET key inflight NX GET EX 15` both takes a lease and reports what was already
+there, and the key is promoted to `committed` only once the insert has
+committed. A retry arriving mid-insert now gets a retryable 503 rather than a
+false `duplicate`, which is what finally makes a 200 with `"duplicate":true`
+mean the rows exist. The 15s lease sits inside the sink's ~20.7s retry budget
+(4 attempts x 5s, plus 100/200/400ms of backoff), so a holder that dies
+mid-insert has its key expire while the sink is still retrying. This one rests
+on regression tests, not on a re-measured outage run -- Phase 7's acceptance
+measurement is still outstanding.
 
 **PostgreSQL is now the pipeline's narrowest point, by roughly 8.6x.** The
 gateway ingests about 200,000 events/sec (Phase 4) and this path commits about
