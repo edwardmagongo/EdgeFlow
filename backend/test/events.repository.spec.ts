@@ -191,3 +191,29 @@ describe('insertEvents multi-chunk atomicity', () => {
     expect(Number(result.rows[0].count)).toBe(0);
   });
 });
+
+describe('insertEvents named statement', () => {
+  it('names the insert statement so Postgres can reuse the plan', async () => {
+    // A named query makes pg use the extended protocol and cache the parsed
+    // plan per connection. The name must encode the row count, because the
+    // statement text varies with it and reusing one name for two different
+    // texts is an error.
+    const names: string[] = [];
+    const client = {
+      query: (config: unknown) => {
+        if (typeof config === 'object' && config !== null && 'name' in config) {
+          names.push(String((config as { name: string }).name));
+        }
+        return Promise.resolve({ rows: [] });
+      },
+      on: () => undefined,
+      off: () => undefined,
+      release: () => undefined,
+    };
+    const pool = { connect: () => Promise.resolve(client) } as unknown as Pool;
+
+    await new EventsRepository(pool).insertEvents(rowsOf(100));
+
+    expect(names).toEqual(['insert_events_100']);
+  });
+});

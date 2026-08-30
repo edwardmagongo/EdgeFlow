@@ -160,7 +160,7 @@ export class EventsRepository {
   }
 
   private async insertChunk(
-    client: { query: (text: string, values: unknown[]) => Promise<unknown> },
+    client: { query: (config: unknown) => Promise<unknown> },
     rows: EventRow[],
   ): Promise<void> {
     const values: unknown[] = [];
@@ -184,10 +184,16 @@ export class EventsRepository {
 
     // Parameterised throughout: the values are device-supplied and must never
     // be interpolated into SQL.
-    await client.query(
-      'INSERT INTO events (device_id, timestamp, temperature, battery, latitude, longitude, event_type) VALUES ' +
+    //
+    // Named so Postgres parses and plans this once per connection instead of
+    // on every request. The name carries the row count because the text does:
+    // pg treats a name bound to two different texts as an error.
+    await client.query({
+      name: `insert_events_${rows.length}`,
+      text:
+        'INSERT INTO events (device_id, timestamp, temperature, battery, latitude, longitude, event_type) VALUES ' +
         tuples.join(', '),
       values,
-    );
+    });
   }
 }
