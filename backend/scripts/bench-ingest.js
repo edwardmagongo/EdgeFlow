@@ -14,6 +14,16 @@
 // byte-for-byte identical to `nosync` except for the flag value, and
 // comparing `nosync` against `sync` (not against `current`) to isolate
 // fsync's cost. See docs/superpowers/sdd/task-1-report.md, "Fix round".
+//
+// CORRECTION (second fix round, post-review): DELETE-based cleanup restored
+// row counts but not physical index size -- a mass insert+delete cycle
+// leaves btree indexes bloated indefinitely (verified: ~14x heap size for
+// the same live row count after this harness's historical use), and index
+// maintenance is part of what `insert` measures. Fixed by REINDEXing the
+// two `events` indexes after cleanup on every run, and by printing the
+// table's row count and index size every run so drift is visible without a
+// separate query. See docs/superpowers/sdd/task-1-report.md, "Second fix
+// round".
 const { Pool } = require('pg');
 const { EventsRepository } = require('../dist/db/events.repository');
 
@@ -79,11 +89,21 @@ function quantile(xs, q) {
 // warm cache, half not). Report p90 and the range alongside it so a stable
 // median can be told apart from a noisy one at a glance (IMPORTANT 4).
 function stats(xs) {
+  // MINOR fix (second fix round): `Math.min(...xs)`/`Math.max(...xs)` spread
+  // the whole sample array onto the call stack, which throws `RangeError:
+  // Maximum call stack size exceeded` above roughly 65k reps. A plain
+  // reduce has no such ceiling.
+  let min = Infinity;
+  let max = -Infinity;
+  for (const x of xs) {
+    if (x < min) min = x;
+    if (x > max) max = x;
+  }
   return {
     median: median(xs),
     p90: quantile(xs, 0.9),
-    min: Math.min(...xs),
-    max: Math.max(...xs),
+    min,
+    max,
   };
 }
 
@@ -223,12 +243,65 @@ async function runVariants(ctx, names, reps, deviceIdBase) {
 // deletes exactly the synthetic rows it inserted, identified by the
 // disjoint device_id range above, after every run. This keeps every variant
 // -- including `current` -- writing to the real table with its real
-// indexes (so the measurement stays representative), while leaving no
-// residue behind. `events` holds only synthetic benchmark/test data and the
-// test suite already truncates it routinely, so this is safe.
+// indexes (so the measurement stays representative), and restores the row
+// count. It does NOT by itself restore physical index size -- see
+// `reindexBenchIndexes` below (IMPORTANT 2 fix, second fix round) for that.
+// `events` holds only synthetic benchmark/test data and the test suite
+// already truncates it routinely, so this is safe.
 async function cleanupBenchRows(ctx) {
   const result = await ctx.pool.query('DELETE FROM events WHERE device_id >= $1', [BENCH_DEVICE_ID_FLOOR]);
   return result.rowCount;
+}
+
+// IMPORTANT 2 fix (second fix round): the comment above claimed cleanup
+// "leaves no residue" -- true for row count, false for physical size.
+// DELETE lets autovacuum reclaim heap space for reuse, but it does not
+// shrink btree indexes or re-densify their sparse internal pages, and index
+// maintenance is a component of `insert` -- the very metric every gate in
+// this report, and Task 6's before/after, depends on. Verified before this
+// fix: `events`'s two indexes measured ~187 MB against a 13 MB heap for the
+// same 120,786 live rows (~14x overhead), residue of the ~1.3M rows earlier
+// harness runs inserted and deleted. Left unaddressed, this footprint grows
+// monotonically with every future run.
+//
+// A dedicated scratch table was considered and rejected again here, for the
+// same reason IMPORTANT 5 rejected it: `current` must exercise the real,
+// compiled `insertEvents`, which has the table name `events` baked into its
+// SQL. Instead, both indexes are REINDEXed after cleanup, every run, so the
+// table returns to a dense baseline regardless of how much churn the run
+// generated -- a deterministic, reproducible physical state per invocation.
+//
+// Tradeoff: `REINDEX ... CONCURRENTLY` (chosen over plain `REINDEX INDEX`,
+// which takes an ACCESS EXCLUSIVE lock for the duration of the rebuild) does
+// not block concurrent reads/writes on `events` -- important because this is
+// the same shared table the app and test suite use -- but it takes
+// noticeably longer than DELETE alone (a full index rebuild by scanning the
+// heap) and cannot run inside a transaction block. It rebuilds only the two
+// named index relations; it does not touch heap/table bloat (already
+// reclaimed by autovacuum) and it never deletes or modifies rows, so the
+// live acceptance-run rows below BENCH_DEVICE_ID_FLOOR are untouched.
+async function reindexBenchIndexes(ctx) {
+  await ctx.pool.query('REINDEX INDEX CONCURRENTLY events_pkey');
+  await ctx.pool.query('REINDEX INDEX CONCURRENTLY events_device_id_timestamp_id_idx');
+}
+
+// Prints live row count plus heap/index/total size so physical drift is
+// visible in the run's own output instead of requiring a separate query
+// (IMPORTANT 2 fix, second fix round).
+async function reportTableFootprint(ctx, label) {
+  const { rows } = await ctx.pool.query(`
+    SELECT
+      (SELECT count(*) FROM events) AS live_rows,
+      pg_relation_size('events') AS heap_bytes,
+      pg_indexes_size('events') AS indexes_bytes,
+      pg_total_relation_size('events') AS total_bytes
+  `);
+  const row = rows[0];
+  const mb = (bytes) => (Number(bytes) / (1024 * 1024)).toFixed(1);
+  console.log(
+    `${label}: live_rows ${row.live_rows}  heap ${mb(row.heap_bytes)} MB  ` +
+    `indexes ${mb(row.indexes_bytes)} MB  total ${mb(row.total_bytes)} MB`
+  );
 }
 
 async function main() {
@@ -260,6 +333,7 @@ async function main() {
 
   console.log(`load average at start: ${require('os').loadavg().map((n) => n.toFixed(2)).join(' ')}`);
   console.log(`rows per batch: ${ROWS_PER_BATCH}, reps: ${reps}`);
+  await reportTableFootprint(ctx, 'table footprint before run');
 
   try {
     // Warm every variant (MINOR fix), not just `current`. `prepared` in
@@ -300,6 +374,8 @@ async function main() {
 
     const deleted = await cleanupBenchRows(ctx);
     console.log(`cleanup: deleted ${deleted} synthetic bench rows (device_id >= ${BENCH_DEVICE_ID_FLOOR})`);
+    await reindexBenchIndexes(ctx);
+    await reportTableFootprint(ctx, 'table footprint after cleanup+reindex');
   } finally {
     await pool.end();
   }
