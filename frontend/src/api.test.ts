@@ -7,6 +7,7 @@ const healthyBody = {
   counters: {
     batches_received: 1,
     batches_duplicate_suppressed: 0,
+    batches_in_flight_rejected: 0,
     events_stored: 1,
     events_skipped_malformed: 0,
     db_failures: 0,

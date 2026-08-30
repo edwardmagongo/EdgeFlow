@@ -66,6 +66,10 @@ export function HealthStrip() {
             <span className="label">dup suppressed</span>
             <strong>{health.counters.batches_duplicate_suppressed}</strong>
           </div>
+          <div data-testid="counter-batches_in_flight_rejected">
+            <span className="label">in-flight rejected</span>
+            <strong>{health.counters.batches_in_flight_rejected}</strong>
+          </div>
           <div data-testid="counter-db_failures">
             <span className="label">db_failures</span>
             <strong>{health.counters.db_failures}</strong>

@@ -14,6 +14,7 @@ export interface HealthResponse {
   counters: {
     batches_received: number;
     batches_duplicate_suppressed: number;
+    batches_in_flight_rejected: number;
     events_stored: number;
     events_skipped_malformed: number;
     db_failures: number;

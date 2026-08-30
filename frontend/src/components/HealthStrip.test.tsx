@@ -23,6 +23,7 @@ const healthyResponse = {
   counters: {
     batches_received: 5,
     batches_duplicate_suppressed: 0,
+    batches_in_flight_rejected: 2,
     events_stored: 5,
     events_skipped_malformed: 0,
     db_failures: 0,
@@ -50,6 +51,7 @@ describe('HealthStrip', () => {
       expect(screen.getByTestId('status-pill')).toHaveTextContent('healthy');
     });
     expect(screen.getByTestId('counter-events_stored')).toHaveTextContent('5');
+    expect(screen.getByTestId('counter-batches_in_flight_rejected')).toHaveTextContent('2');
   });
 
   it('shows degraded status naming the unreachable dependency', async () => {
