@@ -10,9 +10,9 @@ saturating load generator that located the gateway's throughput knee
 (Phase 4), an HTTP sink that POSTs NDJSON batches to a backend endpoint
 (Phase 5), and a NestJS ingestion backend that validates those batches and
 stores them in PostgreSQL, with Redis holding batch-level idempotency keys
-(Phase 6). The HTTP sink still talks to any endpoint you point it at. There
-is now a database and a service to write to it, but no cloud deployment, no
-dashboard, and no read/query API in this repository. Each phase has its own
+(Phase 6). The HTTP sink still talks to any endpoint you point it at. Phase 7
+added a read/query API (`GET /v1/events`) and Phase 8 added a dashboard on top
+of it; there is still no cloud deployment. Each phase has its own
 spec under `docs/superpowers/specs/` and a plan under
 `docs/superpowers/plans/`; Phases 2-6 also have a task-by-task execution log
 under `docs/superpowers/progress/`.
@@ -158,6 +158,31 @@ popping it), e.g.
 `queue_wait_mean_us` is exact; the p50/p99 figures come from a fixed
 histogram whose lowest bucket boundary is 100us, so a reported `p50=100`
 means "at or below 100us", not "exactly 100us".
+
+### Dashboard (Phase 8)
+
+A React + Vite single-page app shows the backend's live health counters
+and lets you browse a device's telemetry history:
+
+    cd frontend
+    npm install
+    npm run dev
+
+Open the URL Vite prints (typically `http://localhost:5173`). By default
+it talks to the backend at `http://localhost:3000`; point it elsewhere
+with `VITE_API_BASE_URL`:
+
+    VITE_API_BASE_URL=http://localhost:4000 npm run dev
+
+The backend must have CORS enabled to accept requests from the
+dashboard's origin -- `app.enableCors()` in `backend/src/main.ts` does
+this already, open to any origin, matching the backend's existing
+no-auth posture.
+
+The health strip polls `GET /v1/health` every 5 seconds. The explorer
+queries `GET /v1/events` and paginates with the opaque cursor it
+returns -- "Next"/"Previous" walk forward and backward through pages
+already fetched in the current session, not through page numbers.
 
 ## Benchmarks
 
