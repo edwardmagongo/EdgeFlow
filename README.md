@@ -130,6 +130,24 @@ storing it twice. A Redis outage concurrent with a sink retry therefore admits
 duplicate rows by design, and the only record that it happened is the
 `redis_unavailable` counter.
 
+Failing open requires *failing*, not waiting: the client sets
+`disableOfflineQueue`, so a command issued during an outage is rejected at once
+instead of being buffered and replayed when Redis returns. Without it a claim
+does not fail open, it blocks for the length of the outage -- which is worse,
+because a blocked ingest request burns the sink's entire retry budget and the
+batch is dropped as exhausted. For the same reason the readiness guard tests
+`isReady` rather than `isOpen`: node-redis keeps `isOpen` true for the whole
+reconnect cycle, so `isOpen` reports a usable connection during an outage.
+
+The connection itself retries indefinitely with an exponential backoff capped at
+2 seconds, in one regime whether or not it has ever connected. An outage ends
+when Redis returns, not when the process restarts, and a Redis that is not up
+yet at boot -- the common case when compose or k8s starts both at once -- is
+picked up when it appears. Startup never blocks on it: `connect()` waits a
+bounded moment for a first connection and then returns, leaving the retry loop
+running, so a missing Redis costs deduplication rather than the service's
+boot.
+
 On shutdown (SIGINT/SIGTERM), the gateway prints its observability counters:
 accepted, dropped_oldest, dropped_newest, and malformed event counts, plus
 queue-wait latency (time from a connection enqueueing an event to a worker
@@ -207,9 +225,16 @@ boolean, which is exactly what Phase 6 deferred and Phase 7 built: one atomic
 there, and the key is promoted to `committed` only once the insert has
 committed. A retry arriving mid-insert now gets a retryable 503 rather than a
 false `duplicate`, which is what finally makes a 200 with `"duplicate":true`
-mean the rows exist. The 15s lease sits inside the sink's ~20.7s retry budget
-(4 attempts x 5s, plus 100/200/400ms of backoff), so a holder that dies
-mid-insert has its key expire while the sink is still retrying. This one rests
+mean the rows exist. The 15s lease is a crash-recovery bound, and deliberately
+not a "the retry lands before the sink gives up" mechanism -- it cannot be one.
+Only the *first* attempt against a hung holder spends its full 5s timeout;
+attempts 2-4 hit the in-flight path, which answers 503 in milliseconds, so the
+sink exhausts at roughly 6s with about 9s still on the lease. What the lease
+actually buys is that a holder which dies mid-insert stops owning the key: once
+it expires, a fresh request carrying the same key can store the batch instead
+of being refused for the rest of the 900s deduplication window. The batch the
+sink gave up on is dropped *visibly*, under `batches_dropped_exhausted`, rather
+than silently while both sides report success. This one rests
 on regression tests, not on a re-measured outage run -- Phase 7's acceptance
 measurement is still outstanding.
 

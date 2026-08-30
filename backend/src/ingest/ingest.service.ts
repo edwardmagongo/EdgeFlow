@@ -30,12 +30,17 @@ export class IngestService {
     // Set only when this request is the one holding the claim, so the catch
     // below releases a key it actually took. A duplicate or an unavailable
     // Redis leaves this undefined and releases nothing.
-    let claimedKey: string | undefined;
+    //
+    // It carries the lease token as well as the key: release() and
+    // markCommitted() are compare-and-swap against that token, so an attempt
+    // whose lease has already expired cannot finish a lease that now belongs to
+    // someone else.
+    let claimed: { key: string; token: string } | undefined;
 
     if (idempotencyKey !== undefined && idempotencyKey.length > 0) {
       const claim = await this.idempotency.claim(idempotencyKey);
 
-      if (claim === 'committed') {
+      if (claim.state === 'committed') {
         // Durably stored by an earlier attempt. This is now true by
         // construction: 'committed' is only written after the insert commits,
         // so reporting success does not tell the sink a lost batch arrived.
@@ -43,7 +48,7 @@ export class IngestService {
         return { received, stored: 0, skipped, duplicate: true };
       }
 
-      if (claim === 'in_flight') {
+      if (claim.state === 'in_flight') {
         // Another attempt is inside its insert right now. Neither answer the
         // boolean key could give was safe: 'duplicate' would drop a batch that
         // may never land, and letting this request insert would store it
@@ -53,13 +58,15 @@ export class IngestService {
         throw new Error('another attempt for this batch is in flight');
       }
 
-      if (claim === 'claimed') {
+      if (claim.state === 'claimed') {
         // ONLY on 'claimed'. The 'unavailable' fail-open path must not set
-        // this: claim() also returns 'unavailable' when the client is open but
+        // this: claim() also returns 'unavailable' when the client is ready but
         // the SET itself errored, and in that case another request may hold a
         // real claim on this key. Releasing it in our catch block would delete
-        // a live claim we never took.
-        claimedKey = idempotencyKey;
+        // a live claim we never took. The discriminated union enforces it now
+        // as well as documenting it -- 'unavailable' carries no token, so there
+        // is nothing to finish a lease with.
+        claimed = { key: idempotencyKey, token: claim.token };
       }
 
       // 'unavailable' falls through and ingests without protection.
@@ -75,8 +82,8 @@ export class IngestService {
       this.metrics.increment('events_stored', stored);
       // Only now is 'committed' true. Doing this before the insert would
       // recreate the defect this phase closes.
-      if (claimedKey !== undefined) {
-        await this.idempotency.markCommitted(claimedKey);
+      if (claimed !== undefined) {
+        await this.idempotency.markCommitted(claimed.key, claimed.token);
       }
       return { received, stored, skipped, duplicate: false };
     } catch (error) {
@@ -88,8 +95,8 @@ export class IngestService {
       // -- and the key is only given back once the insert has definitively
       // failed. release() never throws, so it cannot mask the database error
       // being rethrown here as a 503.
-      if (claimedKey !== undefined) {
-        await this.idempotency.release(claimedKey);
+      if (claimed !== undefined) {
+        await this.idempotency.release(claimed.key, claimed.token);
       }
       throw error;
     }

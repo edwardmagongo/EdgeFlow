@@ -150,7 +150,7 @@ describe('POST /v1/events', () => {
     // Redis instance, by "fails open when Redis is unreachable" in
     // idempotency.service.spec.ts.
     const idempotency = app.get(IdempotencyService);
-    jest.spyOn(idempotency, 'claim').mockResolvedValueOnce('unavailable');
+    jest.spyOn(idempotency, 'claim').mockResolvedValueOnce({ state: 'unavailable' });
 
     const response = await request(app.getHttpServer())
       .post('/v1/events')
@@ -312,6 +312,64 @@ describe('POST /v1/events', () => {
 
     expect(retry.body).toMatchObject({ stored: 0, duplicate: true });
     expect(await storedCount()).toBe(4);
+  });
+
+  it('never disturbs a key another request holds while Redis is unavailable', async () => {
+    // The constraint the design spec singles out by name -- claimedKey is set
+    // ONLY on 'claimed', never on the 'unavailable' fail-open path -- was
+    // guarded by a comment and nothing else: reintroducing the regression left
+    // the whole suite green. A fail-open request has taken no lease, so
+    // whatever it does next must leave a lease another request holds exactly as
+    // it found it, whether the fail-open request fails or succeeds.
+    const key = uniqueKey();
+    const idempotency = app.get(IdempotencyService);
+    const repository = app.get(EventsRepository);
+
+    // Another request legitimately holds a real claim on this key.
+    const held = await idempotency.claim(key);
+    if (held.state !== 'claimed') {
+      throw new Error(`setup failed: expected 'claimed', got '${held.state}'`);
+    }
+
+    // Phase 1: a fail-open request for the SAME key whose insert then fails,
+    // so it runs its catch block. It must not release the held lease.
+    const claimSpy = jest
+      .spyOn(idempotency, 'claim')
+      .mockResolvedValueOnce({ state: 'unavailable' });
+    const insertSpy = jest
+      .spyOn(repository, 'insertEvents')
+      .mockRejectedValueOnce(new Error('connection terminated'));
+
+    await request(app.getHttpServer())
+      .post('/v1/events')
+      .set('Content-Type', NDJSON)
+      .set('Idempotency-Key', key)
+      .send(body(4))
+      .expect(503);
+
+    insertSpy.mockRestore();
+    expect((await idempotency.claim(key)).state).toBe('in_flight');
+
+    // Phase 2: a fail-open request for the same key that SUCCEEDS, so it runs
+    // its markCommitted branch. Promoting the key here would answer a later
+    // retry with 200 duplicate:true on behalf of a batch the real holder may
+    // never store.
+    claimSpy.mockResolvedValueOnce({ state: 'unavailable' });
+
+    await request(app.getHttpServer())
+      .post('/v1/events')
+      .set('Content-Type', NDJSON)
+      .set('Idempotency-Key', key)
+      .send(body(4))
+      .expect(200);
+
+    expect((await idempotency.claim(key)).state).toBe('in_flight');
+    // Still the holder's short lease, not the 900s committed window.
+    expect(await idempotency.ttlForTesting(key)).toBeLessThanOrEqual(15);
+
+    // And the holder can still finish the lease it owns.
+    await idempotency.release(key, held.token);
+    expect((await idempotency.claim(key)).state).toBe('claimed');
   });
 
   it('counts what it did on the health endpoint', async () => {

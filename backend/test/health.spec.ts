@@ -26,7 +26,7 @@ describe('GET /v1/health', () => {
     expect(response.body.counters).toEqual({
       batches_received: 0,
       batches_duplicate_suppressed: 0,
-        batches_in_flight_rejected: 0,
+      batches_in_flight_rejected: 0,
       events_stored: 0,
       events_skipped_malformed: 0,
       db_failures: 0,
