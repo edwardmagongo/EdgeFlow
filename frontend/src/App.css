@@ -1,184 +1,257 @@
-.counter {
-  font-size: 16px;
-  padding: 5px 10px;
-  border-radius: 5px;
-  color: var(--accent);
-  background: var(--accent-bg);
-  border: 2px solid transparent;
-  transition: border-color 0.3s;
+/* Dashboard styles.
+ *
+ * Scoped under .app so nothing here leaks into the tokens index.css defines
+ * (which #root and the element selectors there still own). The palette is
+ * index.css's -- this file adds only the status semantics it has no reason to
+ * know about.
+ *
+ * The read this aims for is an instrument panel, not a card grid: the counter
+ * rail is hairline-separated cells of tabular mono, and the status pill is the
+ * one saturated thing on the page. Everything else stays quiet.
+ */
+
+:root {
+  --ok: #1a7f4b;
+  --ok-bg: rgba(26, 127, 75, 0.1);
+  --warn: #8a5a00;
+  --warn-bg: rgba(138, 90, 0, 0.1);
+  --down: #6b6375;
+  --down-bg: rgba(107, 99, 117, 0.1);
+  --err: #b3261e;
+  --err-bg: rgba(179, 38, 30, 0.08);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --ok: #34d399;
+    --ok-bg: rgba(52, 211, 153, 0.12);
+    --warn: #fbbf24;
+    --warn-bg: rgba(251, 191, 36, 0.12);
+    --down: #9ca3af;
+    --down-bg: rgba(156, 163, 175, 0.12);
+    --err: #f87171;
+    --err-bg: rgba(248, 113, 113, 0.12);
+  }
+}
+
+.app {
+  text-align: left; /* #root centres by default; tabular data must not be. */
+  padding: 0 24px 48px;
+}
+
+.app header h1 {
+  font-size: 24px;
+  letter-spacing: -0.3px;
+  margin: 28px 0 20px;
+}
+
+/* --- Counter rail ------------------------------------------------------- */
+
+.app .health-strip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: stretch;
+  gap: 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
   margin-bottom: 24px;
-
-  &:hover {
-    border-color: var(--accent-border);
-  }
-  &:focus-visible {
-    outline: 2px solid var(--accent);
-    outline-offset: 2px;
-  }
 }
 
-.hero {
-  position: relative;
-
-  .base,
-  .framework,
-  .vite {
-    inset-inline: 0;
-    margin: 0 auto;
-  }
-
-  .base {
-    width: 170px;
-    position: relative;
-    z-index: 0;
-  }
-
-  .framework,
-  .vite {
-    position: absolute;
-  }
-
-  .framework {
-    z-index: 1;
-    top: 34px;
-    height: 28px;
-    transform: perspective(2000px) rotateZ(300deg) rotateX(44deg) rotateY(39deg)
-      scale(1.4);
-  }
-
-  .vite {
-    z-index: 0;
-    top: 107px;
-    height: 26px;
-    width: auto;
-    transform: perspective(2000px) rotateZ(300deg) rotateX(40deg) rotateY(39deg)
-      scale(0.8);
-  }
-}
-
-#center {
+.app .health-strip > div {
   display: flex;
   flex-direction: column;
-  gap: 25px;
-  place-content: center;
-  place-items: center;
-  flex-grow: 1;
-
-  @media (max-width: 1024px) {
-    padding: 32px 20px 24px;
-    gap: 18px;
-  }
-}
-
-#next-steps {
-  display: flex;
-  border-top: 1px solid var(--border);
-  text-align: left;
-
-  & > div {
-    flex: 1 1 0;
-    padding: 32px;
-    @media (max-width: 1024px) {
-      padding: 24px 20px;
-    }
-  }
-
-  .icon {
-    margin-bottom: 16px;
-    width: 22px;
-    height: 22px;
-  }
-
-  @media (max-width: 1024px) {
-    flex-direction: column;
-    text-align: center;
-  }
-}
-
-#docs {
+  gap: 4px;
+  padding: 10px 16px;
+  /* Grow so each wrapped row fills the rail edge to edge. Without this the
+   * leftover space at the end of a row reads as an empty eighth cell. */
+  flex: 1 1 auto;
   border-right: 1px solid var(--border);
-
-  @media (max-width: 1024px) {
-    border-right: none;
-    border-bottom: 1px solid var(--border);
-  }
 }
 
-#next-steps ul {
-  list-style: none;
-  padding: 0;
+.app .health-strip > div:last-child {
+  border-right: 0;
+}
+
+.app .health-strip .label {
+  font-size: 11px;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+  color: var(--text);
+  white-space: nowrap;
+}
+
+.app .health-strip strong {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 20px;
+  font-weight: 500;
+  color: var(--text-h);
+}
+
+/* The one saturated element. Colour is redundant with the text it carries
+ * ("healthy" / "degraded" / "unreachable"), never the only signal. */
+/* Must out-specify `.app .health-strip > div` above (0,2,1), which otherwise
+ * wins on specificity and stretches the pill to fill its row. */
+.app .health-strip > .status-pill {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  /* Never grows: the saturated fill stays as small as the text it carries. */
+  flex: 0 0 auto;
+  margin-left: auto;
+  padding: 10px 16px;
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: 0.2px;
+  border-left: 1px solid var(--border);
+}
+
+/* While health is unavailable the strip renders no counters, so the pill is
+ * its only child. Hug it instead of drawing a full-width empty rail. */
+.app .health-strip:has(> .status-pill:only-child) {
+  display: inline-flex;
+}
+
+.app .health-strip > .status-pill:only-child {
+  margin-left: 0;
+  border-left: 0;
+}
+
+.app .status-healthy {
+  color: var(--ok);
+  background: var(--ok-bg);
+}
+.app .status-degraded {
+  color: var(--warn);
+  background: var(--warn-bg);
+}
+.app .status-unreachable {
+  color: var(--down);
+  background: var(--down-bg);
+}
+.app .status-checking {
+  color: var(--text);
+}
+
+/* --- Query form --------------------------------------------------------- */
+
+.app .events-explorer {
+  overflow-x: auto;
+}
+
+.app form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+.app input,
+.app select,
+.app button {
+  font: inherit;
+  font-size: 14px;
+  padding: 7px 10px;
+  color: var(--text-h);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+
+.app input {
+  font-family: var(--mono);
+  min-width: 0;
+}
+
+.app input[aria-label='device_id'],
+.app input[aria-label='limit'] {
+  width: 9ch;
+}
+
+.app input[aria-label='from'],
+.app input[aria-label='to'] {
+  width: 27ch;
+}
+
+.app button {
+  cursor: pointer;
+  background: var(--accent-bg);
+  border-color: var(--accent-border);
+  color: var(--text-h);
+}
+
+.app button:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+.app button:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
+.app :focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* --- Results ------------------------------------------------------------ */
+
+.app [role='alert'] {
+  margin-bottom: 16px;
+  padding: 10px 14px;
+  font-size: 14px;
+  color: var(--err);
+  background: var(--err-bg);
+  border: 1px solid var(--err);
+  border-radius: 4px;
+}
+
+.app table {
+  width: 100%;
+  min-width: 720px;
+  border-collapse: collapse;
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 13px;
+}
+
+.app th,
+.app td {
+  padding: 7px 12px;
+  text-align: left;
+  white-space: nowrap;
+  border-bottom: 1px solid var(--border);
+}
+
+.app th {
+  font-weight: 500;
+  font-size: 11px;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+  color: var(--text);
+}
+
+.app tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.app td {
+  color: var(--text-h);
+}
+
+.app .events-explorer > p {
+  padding: 20px 0;
+  font-size: 14px;
+}
+
+.app .pagination {
   display: flex;
   gap: 8px;
-  margin: 32px 0 0;
-
-  .logo {
-    height: 18px;
-  }
-
-  a {
-    color: var(--text-h);
-    font-size: 16px;
-    border-radius: 6px;
-    background: var(--social-bg);
-    display: flex;
-    padding: 6px 12px;
-    align-items: center;
-    gap: 8px;
-    text-decoration: none;
-    transition: box-shadow 0.3s;
-
-    &:hover {
-      box-shadow: var(--shadow);
-    }
-    .button-icon {
-      height: 18px;
-      width: 18px;
-    }
-  }
-
-  @media (max-width: 1024px) {
-    margin-top: 20px;
-    flex-wrap: wrap;
-    justify-content: center;
-
-    li {
-      flex: 1 1 calc(50% - 8px);
-    }
-
-    a {
-      width: 100%;
-      justify-content: center;
-      box-sizing: border-box;
-    }
-  }
+  margin-top: 16px;
 }
 
-#spacer {
-  height: 88px;
-  border-top: 1px solid var(--border);
-  @media (max-width: 1024px) {
-    height: 48px;
-  }
-}
-
-.ticks {
-  position: relative;
-  width: 100%;
-
-  &::before,
-  &::after {
-    content: '';
-    position: absolute;
-    top: -4.5px;
-    border: 5px solid transparent;
-  }
-
-  &::before {
-    left: 0;
-    border-left-color: var(--border);
-  }
-  &::after {
-    right: 0;
-    border-right-color: var(--border);
+@media (prefers-reduced-motion: no-preference) {
+  .app button {
+    transition: border-color 120ms ease;
   }
 }

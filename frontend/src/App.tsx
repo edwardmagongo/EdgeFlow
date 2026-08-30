@@ -1,3 +1,4 @@
+import './App.css';
 import { HealthStrip } from './components/HealthStrip';
 import { EventsExplorer } from './components/EventsExplorer';
 
