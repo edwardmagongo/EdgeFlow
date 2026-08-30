@@ -14,7 +14,11 @@ export function EventsExplorer() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  async function runQuery(cursor: string | undefined) {
+  // `onSuccess` commits a cursor-stack change only once the request actually
+  // succeeds. Without this, a failed navigation would leave cursorStack
+  // pointing somewhere the last-known-good results don't correspond to,
+  // desyncing the Previous/Next buttons from what's on screen.
+  async function runQuery(cursor: string | undefined, onSuccess?: (string | undefined)[]) {
     setLoading(true);
     setError(null);
     try {
@@ -28,6 +32,9 @@ export function EventsExplorer() {
       });
       setResults(response.events);
       setNextCursor(response.next_cursor);
+      if (onSuccess) {
+        setCursorStack(onSuccess);
+      }
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Request failed');
     } finally {
@@ -38,21 +45,20 @@ export function EventsExplorer() {
   function handleSubmit(event: FormEvent) {
     event.preventDefault();
     setCursorStack([undefined]);
+    setNextCursor(null);
     void runQuery(undefined);
   }
 
   function handleNext() {
     if (!nextCursor) return;
     const newStack = [...cursorStack, nextCursor];
-    setCursorStack(newStack);
-    void runQuery(nextCursor);
+    void runQuery(nextCursor, newStack);
   }
 
   function handlePrevious() {
     if (cursorStack.length <= 1) return;
     const newStack = cursorStack.slice(0, -1);
-    setCursorStack(newStack);
-    void runQuery(newStack[newStack.length - 1]);
+    void runQuery(newStack[newStack.length - 1], newStack);
   }
 
   return (

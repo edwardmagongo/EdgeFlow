@@ -48,6 +48,28 @@ describe('EventsExplorer', () => {
     });
   });
 
+  it('forwards every filter field exactly as entered, including a non-default order', async () => {
+    const queryEventsMock = vi.mocked(api.queryEvents).mockResolvedValue({ events: [], next_cursor: null });
+    render(<EventsExplorer />);
+
+    fillDeviceId('42');
+    fireEvent.change(screen.getByLabelText('from'), { target: { value: '2026-01-01T00:00:00Z' } });
+    fireEvent.change(screen.getByLabelText('to'), { target: { value: '2026-02-01T00:00:00Z' } });
+    fireEvent.change(screen.getByLabelText('limit'), { target: { value: '25' } });
+    fireEvent.change(screen.getByLabelText('order'), { target: { value: 'asc' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Query' }));
+
+    await waitFor(() => expect(queryEventsMock).toHaveBeenCalled());
+    expect(queryEventsMock).toHaveBeenCalledWith({
+      deviceId: 42,
+      from: '2026-01-01T00:00:00Z',
+      to: '2026-02-01T00:00:00Z',
+      limit: 25,
+      order: 'asc',
+      cursor: undefined,
+    });
+  });
+
   it('renders returned rows in the results table', async () => {
     vi.mocked(api.queryEvents).mockResolvedValue({
       events: [
