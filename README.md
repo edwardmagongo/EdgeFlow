@@ -259,9 +259,64 @@ actually buys is that a holder which dies mid-insert stops owning the key: once
 it expires, a fresh request carrying the same key can store the batch instead
 of being refused for the rest of the 900s deduplication window. The batch the
 sink gave up on is dropped *visibly*, under `batches_dropped_exhausted`, rather
-than silently while both sides report success. This one rests
-on regression tests, not on a re-measured outage run -- Phase 7's acceptance
-measurement is still outstanding.
+than silently while both sides report success.
+
+**Measured against a SIGSTOPped database, which is the only way to reproduce
+it.** `docker compose stop postgres` terminates connections, so inserts fail
+*fast* -- that is Phase 6's scenario and it cannot exercise this window at all.
+`docker compose pause` SIGSTOPs the container, so connections **hang** and an
+insert is still running when the sink's 5s timeout fires. Both were run for 30s
+at 500 devices x 10 events/sec, with a 10s outage in the middle, at load average
+4.15 (two unrelated CPU-heavy processes from another project were still running;
+the assertions below are conservation identities, not throughput figures, so
+they are robust to that -- no rate is published from these runs).
+
+| | `pause` (slow failure) | `stop` (fast failure) |
+|---|---|---|
+| accepted | 148,267 | 148,291 |
+| rows committed | 123,863 | 119,200 |
+| `batches_in_flight_rejected` | **3** | **0** |
+| `db_failures` | 0 | 50 |
+| `batches_retried` | 3 | 38 |
+| `batches_dropped_outbound` | 245 | 281 |
+| `batches_dropped_exhausted` | 1 | 12 |
+| `batches_duplicate_suppressed` | 0 | 0 |
+
+The two columns exercise different code paths, which is the point: only the
+paused database produces in-flight rejections, and only the stopped one
+produces `db_failures`. A `stop`-based run would have come back green and
+proven nothing about this phase.
+
+Nothing goes missing while both sides report success. Under `pause`, 148,267 -
+123,863 = 24,404 events were not stored, against 245 + 1 = 246 batches the
+gateway itself counted as dropped, which can hold at most 24,600 -- so the
+shortfall is fully attributable, with no residue. `events_stored` equalled the
+row count exactly in both runs. The backend's arrival count reconciles exactly
+too: under `stop`, 1,197 delivered + 50 failed = 1,247 received; under `pause`,
+1,245 delivered + 1 first attempt + 3 in-flight-rejected retries = 1,249.
+
+That last identity is the new path caught in the act: one batch's first attempt
+hung inside its insert, the sink timed out and retried three times, and each
+retry found the lease held and got a 503 -- `batches_retried` 3 and
+`batches_in_flight_rejected` 3, exactly matching. Before Phase 7 those three
+retries would each have been told `duplicate: true` and the batch would have
+been dropped as delivered.
+
+Note the run produced `batches_dropped_exhausted=1`. An earlier version of this
+section derived the 15s lease from the sink's ~20.7s retry budget and predicted
+exhausted batches should not occur; that reasoning is withdrawn above, and the
+measurement is what confirms it. The gateway's report stays conservative in the
+safe direction: it never claims success for data that was not stored, though it
+may report a batch as dropped whose insert did in fact commit after the database
+came back.
+
+**A Redis restart no longer costs deduplication for the life of the process.**
+Restarting Redis mid-run, health went `redis: true -> false -> true` across two
+consecutive polls a second apart, on the same backend PID with no process
+restart, logging `connection lost` then `connection restored`. 22 claims failed
+open during the gap and every one returned promptly rather than blocking, and
+`GET /v1/health` kept answering throughout instead of hanging with the outage.
+All 49,400 accepted events were committed -- zero dropped, zero retried.
 
 **PostgreSQL is now the pipeline's narrowest point, by roughly 8.6x.** The
 gateway ingests about 200,000 events/sec (Phase 4) and this path commits about
