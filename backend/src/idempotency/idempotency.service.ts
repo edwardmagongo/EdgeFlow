@@ -3,12 +3,32 @@ import { createClient, RedisClientType } from 'redis';
 import { loadConfig } from '../config';
 import { MetricsService } from '../metrics/metrics.service';
 
-export type ClaimResult = 'claimed' | 'duplicate' | 'unavailable';
+// 'in_flight' means another attempt is inside its insert right now. It is
+// deliberately NOT 'duplicate': answering duplicate would tell the sink the
+// batch is stored when it may never be, which is exactly the data loss this
+// phase closes.
+export type ClaimResult = 'claimed' | 'in_flight' | 'committed' | 'unavailable';
 
 export interface IdempotencyOptions {
   redisUrl: string;
   idempotencyTtlSeconds: number;
+  // Optional so existing callers and loadConfig() keep working; defaults to
+  // IN_FLIGHT_LEASE_SECONDS below.
+  inFlightLeaseSeconds?: number;
 }
+
+// The two values a key can hold.
+const IN_FLIGHT = 'inflight';
+const COMMITTED = 'committed';
+
+// How long a claim survives without being committed or released. Bounded by
+// the sink's retry budget -- 4 attempts x 5s timeout plus 100+200+400ms of
+// backoff, about 20.7s -- so that a holder which dies mid-insert has its key
+// expire while the sink is STILL retrying, and the batch lands on a later
+// attempt instead of being dropped. Raising this above that budget silently
+// reintroduces the loss this phase exists to close, which is why it is a
+// constant here and not an environment variable.
+const IN_FLIGHT_LEASE_SECONDS = 15;
 
 @Injectable()
 export class IdempotencyService implements OnModuleInit, OnModuleDestroy {
@@ -53,23 +73,59 @@ export class IdempotencyService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  // SET key 1 NX EX ttl. Returns 'claimed' when this caller won the key,
-  // 'duplicate' when it already existed, and 'unavailable' when Redis could not
-  // answer -- in which case the caller ingests anyway. See the fail-open note.
+  // One atomic command does both jobs: NX refuses to overwrite an existing
+  // key, GET returns whatever was already there. The returned value IS the
+  // state, so there is no read-then-write window for a concurrent retry to
+  // slip through. Requires Redis >= 7.0 for NX and GET together; the compose
+  // file pins redis:7.
   async claim(key: string): Promise<ClaimResult> {
     if (this.client === null || !this.client.isOpen) {
       this.metrics.increment('redis_unavailable');
       return 'unavailable';
     }
     try {
-      const result = await this.client.set(key, '1', {
+      const previous = await this.client.set(key, IN_FLIGHT, {
         NX: true,
-        EX: this.options.idempotencyTtlSeconds,
+        GET: true,
+        EX: this.options.inFlightLeaseSeconds ?? IN_FLIGHT_LEASE_SECONDS,
       });
-      return result === null ? 'duplicate' : 'claimed';
+      if (previous === null) {
+        return 'claimed';
+      }
+      if (previous === COMMITTED) {
+        return 'committed';
+      }
+      // Any other value, including IN_FLIGHT: treat as in flight. Refusing is
+      // the conservative answer -- it costs a retry, where guessing wrong in
+      // the other direction costs the batch.
+      return 'in_flight';
     } catch {
       this.metrics.increment('redis_unavailable');
       return 'unavailable';
+    }
+  }
+
+  // Promotes a held lease to the durable deduplication window. Called ONLY
+  // after the insert has committed, which is what makes a later 'committed'
+  // answer -- and the 200 duplicate the endpoint returns for it -- actually
+  // true.
+  //
+  // Never throws: the caller has already stored the batch successfully, and
+  // failing the request now would make the sink retry data that is already
+  // durable. If this fails, the lease simply expires and a later retry may
+  // store the batch a second time; duplication over loss, and the
+  // redis_unavailable counter records it.
+  async markCommitted(key: string): Promise<void> {
+    if (this.client === null || !this.client.isOpen) {
+      this.metrics.increment('redis_unavailable');
+      return;
+    }
+    try {
+      await this.client.set(key, COMMITTED, {
+        EX: this.options.idempotencyTtlSeconds,
+      });
+    } catch {
+      this.metrics.increment('redis_unavailable');
     }
   }
 
@@ -87,9 +143,10 @@ export class IdempotencyService implements OnModuleInit, OnModuleDestroy {
     try {
       await this.client.del(key);
     } catch {
-      // Swallow. Worst case the key simply lives out its TTL and the next
-      // retry is suppressed as a duplicate instead of released -- survivable,
-      // unlike surfacing this error in place of the real 503 cause.
+      // Swallow. Worst case the in-flight lease simply expires on its own
+      // within IN_FLIGHT_LEASE_SECONDS and the next retry claims it then -- a
+      // delay, not a loss, and far better than surfacing this error in place
+      // of the real 503.
     }
   }
 

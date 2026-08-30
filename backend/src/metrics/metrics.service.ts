@@ -5,6 +5,7 @@ import { Injectable } from '@nestjs/common';
 export type CounterName =
   | 'batches_received'
   | 'batches_duplicate_suppressed'
+  | 'batches_in_flight_rejected'
   | 'events_stored'
   | 'events_skipped_malformed'
   | 'db_failures'
@@ -13,6 +14,7 @@ export type CounterName =
 const COUNTER_NAMES: CounterName[] = [
   'batches_received',
   'batches_duplicate_suppressed',
+  'batches_in_flight_rejected',
   'events_stored',
   'events_skipped_malformed',
   'db_failures',

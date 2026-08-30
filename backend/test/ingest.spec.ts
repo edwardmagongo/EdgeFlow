@@ -224,6 +224,96 @@ describe('POST /v1/events', () => {
     expect(await storedCount()).toBe(4);
   });
 
+  it('rejects a retry that arrives while the first attempt is still inserting', async () => {
+    // The slow-failure window. A boolean key answered 'duplicate' here, the
+    // endpoint returned 200 with stored:0, and the sink dropped a batch that
+    // was never written. The correct answer is a retryable 503.
+    //
+    // The insert is held open deliberately rather than by timing luck, so the
+    // second request is guaranteed to arrive mid-insert.
+    const key = uniqueKey();
+    const payload = body(4);
+    const repository = app.get(EventsRepository);
+
+    // Two signals, so this test never depends on timing: `started` fires when
+    // the insert is genuinely underway, `held` keeps it there until we let go.
+    let releaseInsert!: () => void;
+    let insertStarted!: () => void;
+    const held = new Promise<void>((resolve) => {
+      releaseInsert = resolve;
+    });
+    const started = new Promise<void>((resolve) => {
+      insertStarted = resolve;
+    });
+    const original = repository.insertEvents.bind(repository);
+    const spy = jest
+      .spyOn(repository, 'insertEvents')
+      .mockImplementationOnce(async (rows) => {
+        insertStarted();
+        await held;
+        return original(rows);
+      });
+
+    // .then() is what actually dispatches a supertest request -- assigning the
+    // builder alone sends nothing. Without this the SECOND request would be
+    // the one to hit mockImplementationOnce and would deadlock waiting on a
+    // promise only it could release.
+    const first = request(app.getHttpServer())
+      .post('/v1/events')
+      .set('Content-Type', NDJSON)
+      .set('Idempotency-Key', key)
+      .send(payload)
+      .then((response) => response);
+
+    try {
+      // Deterministic: proceed only once the first insert is actually running.
+      await started;
+
+      await request(app.getHttpServer())
+        .post('/v1/events')
+        .set('Content-Type', NDJSON)
+        .set('Idempotency-Key', key)
+        .send(payload)
+        .expect(503);
+    } finally {
+      // Always release, even on assertion failure, or the pending request
+      // keeps the app open and afterAll's app.close() hangs.
+      releaseInsert();
+    }
+
+    const firstResponse = await first;
+    expect(firstResponse.status).toBe(200);
+    spy.mockRestore();
+
+    // The first attempt's rows landed exactly once, and the retry was refused
+    // rather than being told the batch was already stored.
+    expect(await storedCount()).toBe(4);
+    const health = await request(app.getHttpServer()).get('/v1/health').expect(200);
+    expect(health.body.counters.batches_in_flight_rejected).toBeGreaterThan(0);
+  });
+
+  it('reports duplicate only once the first attempt has committed', async () => {
+    const key = uniqueKey();
+    const payload = body(4);
+
+    await request(app.getHttpServer())
+      .post('/v1/events')
+      .set('Content-Type', NDJSON)
+      .set('Idempotency-Key', key)
+      .send(payload)
+      .expect(200);
+
+    const retry = await request(app.getHttpServer())
+      .post('/v1/events')
+      .set('Content-Type', NDJSON)
+      .set('Idempotency-Key', key)
+      .send(payload)
+      .expect(200);
+
+    expect(retry.body).toMatchObject({ stored: 0, duplicate: true });
+    expect(await storedCount()).toBe(4);
+  });
+
   it('counts what it did on the health endpoint', async () => {
     await request(app.getHttpServer())
       .post('/v1/events')

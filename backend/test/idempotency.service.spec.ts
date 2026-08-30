@@ -1,6 +1,8 @@
 import { IdempotencyService } from '../src/idempotency/idempotency.service';
 import { MetricsService } from '../src/metrics/metrics.service';
 
+const REDIS_URL = process.env.REDIS_URL ?? 'redis://localhost:6380';
+
 describe('IdempotencyService', () => {
   let metrics: MetricsService;
   let service: IdempotencyService;
@@ -26,10 +28,12 @@ describe('IdempotencyService', () => {
     expect(await service.claim(uniqueKey())).toBe('claimed');
   });
 
-  it('reports the second claim of the same key as a duplicate', async () => {
+  it('reports the second claim of a held key as in_flight', async () => {
     const key = uniqueKey();
     expect(await service.claim(key)).toBe('claimed');
-    expect(await service.claim(key)).toBe('duplicate');
+    // Was 'duplicate' before Phase 7. A held-but-uncommitted key means another
+    // attempt is mid-insert, which is NOT the same as the batch being stored.
+    expect(await service.claim(key)).toBe('in_flight');
   });
 
   it('treats distinct keys independently', async () => {
@@ -58,7 +62,7 @@ describe('IdempotencyService', () => {
     // duplicate.
     const key = uniqueKey();
     expect(await service.claim(key)).toBe('claimed');
-    expect(await service.claim(key)).toBe('duplicate');
+    expect(await service.claim(key)).toBe('in_flight');
 
     await service.release(key);
 
@@ -98,5 +102,90 @@ describe('IdempotencyService', () => {
     expect(await offline.isReachable()).toBe(false);
 
     await offline.onModuleDestroy();
+  });
+});
+
+describe('three-state claim', () => {
+  let metrics: MetricsService;
+  let service: IdempotencyService;
+
+  beforeEach(async () => {
+    metrics = new MetricsService();
+    service = new IdempotencyService(metrics, {
+      redisUrl: REDIS_URL,
+      idempotencyTtlSeconds: 900,
+    });
+    await service.connect();
+  });
+
+  afterEach(async () => {
+    await service.onModuleDestroy();
+  });
+
+  function uniqueKey(): string {
+    return `state-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  }
+
+  it('reports in_flight while a claim is held, not duplicate', async () => {
+    // The defect this phase exists to close: with a boolean key the second
+    // claim said 'duplicate', the endpoint answered 200, and the sink dropped
+    // a batch that was never stored.
+    const key = uniqueKey();
+    expect(await service.claim(key)).toBe('claimed');
+    expect(await service.claim(key)).toBe('in_flight');
+  });
+
+  it('reports committed only after markCommitted', async () => {
+    const key = uniqueKey();
+    expect(await service.claim(key)).toBe('claimed');
+    await service.markCommitted(key);
+    expect(await service.claim(key)).toBe('committed');
+  });
+
+  it('gives the in-flight lease a short TTL and the committed state the full one', async () => {
+    const key = uniqueKey();
+    await service.claim(key);
+    const leaseTtl = await service.ttlForTesting(key);
+    expect(leaseTtl).toBeGreaterThan(0);
+    expect(leaseTtl).toBeLessThanOrEqual(15);
+
+    await service.markCommitted(key);
+    const committedTtl = await service.ttlForTesting(key);
+    expect(committedTtl).toBeGreaterThan(15);
+  });
+
+  it('lets a fresh claim through once the in-flight lease expires', async () => {
+    // Crash recovery: a holder that dies mid-insert must not block the key
+    // forever. Uses a deliberately tiny lease rather than sleeping 15s.
+    const shortLease = new IdempotencyService(metrics, {
+      redisUrl: REDIS_URL,
+      idempotencyTtlSeconds: 900,
+      inFlightLeaseSeconds: 1,
+    });
+    await shortLease.connect();
+    const key = uniqueKey();
+    expect(await shortLease.claim(key)).toBe('claimed');
+    expect(await shortLease.claim(key)).toBe('in_flight');
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+    expect(await shortLease.claim(key)).toBe('claimed');
+    await shortLease.onModuleDestroy();
+  });
+
+  it('release makes a held key claimable again', async () => {
+    const key = uniqueKey();
+    expect(await service.claim(key)).toBe('claimed');
+    await service.release(key);
+    expect(await service.claim(key)).toBe('claimed');
+  });
+
+  it('markCommitted on an unreachable Redis does not throw', async () => {
+    const dead = new IdempotencyService(metrics, {
+      redisUrl: 'redis://localhost:6390',
+      idempotencyTtlSeconds: 900,
+      inFlightLeaseSeconds: 15,
+    });
+    await dead.connect();
+    await expect(dead.markCommitted('anything')).resolves.toBeUndefined();
+    await dead.onModuleDestroy();
   });
 });
