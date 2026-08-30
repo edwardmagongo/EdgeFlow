@@ -4,11 +4,27 @@
 // no gateway, no simulator, no HTTP -- so a run takes seconds and many
 // repetitions are cheap. The end-to-end number stays Phase 6's method; this
 // instrument exists to say WHERE the per-request time goes.
+//
+// CORRECTION (fix round, post-review): the original `nosync` variant was
+// compared directly against `current` to judge fsync's cost, but the two
+// arms did not do the same number of round trips (`nosync` adds a `SET`
+// and a restore that `current` never pays), so the comparison was
+// confounded by protocol overhead of about the same size as the effect
+// being measured. Fixed by adding a `sync` control variant that is
+// byte-for-byte identical to `nosync` except for the flag value, and
+// comparing `nosync` against `sync` (not against `current`) to isolate
+// fsync's cost. See docs/superpowers/sdd/task-1-report.md, "Fix round".
 const { Pool } = require('pg');
 const { EventsRepository } = require('../dist/db/events.repository');
 
 const ROWS_PER_BATCH = 100;
-const DEFAULT_REPS = 200;
+const DEFAULT_REPS = 2000;
+const WARMUP_REPS = 20;
+// Synthetic device IDs used by this harness. Chosen to sit well above any
+// ID used by the app or by the test suite (verified empirically: real/test
+// data in this database tops out at device_id 499) so the cleanup below can
+// delete exactly what this harness inserted without touching anything else.
+const BENCH_DEVICE_ID_FLOOR = 9000;
 
 function makeBatch(deviceId, count) {
   const rows = [];
@@ -48,6 +64,33 @@ function median(xs) {
   return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
 }
 
+// Linear-interpolation quantile (same convention as numpy's default) so p90
+// gives a meaningful reading even at modest sample sizes.
+function quantile(xs, q) {
+  const s = [...xs].sort((a, b) => a - b);
+  const pos = (s.length - 1) * q;
+  const lo = Math.floor(pos);
+  const hi = Math.ceil(pos);
+  if (lo === hi) return s[lo];
+  return s[lo] + (pos - lo) * (s[hi] - s[lo]);
+}
+
+// A single median hides bimodal distributions (e.g. half the reps hitting a
+// warm cache, half not). Report p90 and the range alongside it so a stable
+// median can be told apart from a noisy one at a glance (IMPORTANT 4).
+function stats(xs) {
+  return {
+    median: median(xs),
+    p90: quantile(xs, 0.9),
+    min: Math.min(...xs),
+    max: Math.max(...xs),
+  };
+}
+
+function fmtStats(s) {
+  return `median ${s.median.toFixed(3)} ms  p90 ${s.p90.toFixed(3)} ms  min ${s.min.toFixed(3)} ms  max ${s.max.toFixed(3)} ms`;
+}
+
 function ms(nanos) { return Number(nanos) / 1e6; }
 
 // --- variants -------------------------------------------------------------
@@ -71,24 +114,59 @@ async function prepared(ctx, rows) {
   await ctx.pool.query({ name: `bench_ins_${rows.length}`, text, values });
 }
 
-async function nosync(ctx, rows) {
-  // DIAGNOSTIC ONLY. Session-level, never persisted to server config: this
-  // exists to size commit-fsync's share of the critical path, and answers
-  // whether statement-level work can pay at all.
+// `sync` and `nosync` are a MATCHED PAIR (CRITICAL 1 fix): both do the exact
+// same sequence of round trips -- connect, SET, BEGIN, INSERT, COMMIT,
+// RESET, release -- and differ ONLY in the value of synchronous_commit. Any
+// timing delta between them is therefore attributable to the flag itself,
+// not to a different number of round trips. Neither should be compared
+// directly against `current`/`notxn`/`prepared`, which do not pay the
+// SET/RESET round trips at all -- that comparison is exactly the confound
+// this fix removes.
+async function withSynchronousCommit(ctx, rows, value) {
   const client = await ctx.pool.connect();
+  let failed = false;
   try {
-    await client.query("SET synchronous_commit = 'off'");
+    await client.query(`SET synchronous_commit = '${value}'`);
     const { text, values } = buildInsert(rows);
     await client.query('BEGIN');
     await client.query(text, values);
     await client.query('COMMIT');
+  } catch (error) {
+    failed = true;
+    throw error;
   } finally {
-    await client.query("SET synchronous_commit = 'on'").catch(() => undefined);
-    client.release();
+    try {
+      // RESET (not `SET ... 'on'`): this is a pooled connection, and RESET
+      // restores the server default regardless of what it was, which is the
+      // only value the pool's next borrower should ever see (MINOR fix).
+      await client.query('RESET synchronous_commit');
+    } catch (error) {
+      // If the restore itself fails, the connection may still be carrying
+      // relaxed durability. Do not let it go back to the pool (MINOR fix):
+      // a swallowed restore failure previously returned the connection
+      // unconditionally, silently corrupting later measurements on whatever
+      // variant next drew that connection.
+      failed = true;
+    }
+    client.release(failed);
   }
 }
 
-const VARIANTS = { current, notxn, prepared, nosync };
+async function sync(ctx, rows) {
+  // CONTROL for nosync. Diagnostic only, session-level, never persisted to
+  // server config.
+  await withSynchronousCommit(ctx, rows, 'on');
+}
+
+async function nosync(ctx, rows) {
+  // DIAGNOSTIC ONLY. Session-level, never persisted to server config: this
+  // exists to size commit-fsync's share of the critical path, and answers
+  // whether statement-level work can pay at all. Compare against `sync`
+  // (the matched control above), not against `current`.
+  await withSynchronousCommit(ctx, rows, 'off');
+}
+
+const VARIANTS = { current, notxn, prepared, sync, nosync };
 
 // --- per-step breakdown ---------------------------------------------------
 
@@ -119,14 +197,14 @@ async function stepBreakdown(ctx, rows) {
 
 // --- drivers --------------------------------------------------------------
 
-async function runVariants(ctx, names, reps) {
+async function runVariants(ctx, names, reps, deviceIdBase) {
   const timings = {};
   names.forEach((n) => { timings[n] = []; });
   // INTERLEAVED: one rep of every variant, then repeat. Blocked runs would
   // attribute this machine's background drift to the variant.
   for (let rep = 0; rep < reps; rep += 1) {
     for (const name of names) {
-      const rows = makeBatch(9000 + rep, ROWS_PER_BATCH);
+      const rows = makeBatch(deviceIdBase + rep, ROWS_PER_BATCH);
       const start = process.hrtime.bigint();
       await VARIANTS[name](ctx, rows);
       timings[name].push(ms(process.hrtime.bigint() - start));
@@ -135,10 +213,43 @@ async function runVariants(ctx, names, reps) {
   return timings;
 }
 
+// IMPORTANT 5 fix: this harness previously left every row it inserted in the
+// shared `events` table -- roughly 300k rows accumulated across runs, and
+// every cross-task comparison drifted as the table (and its composite
+// index) grew. A dedicated scratch table was considered and rejected: the
+// `current` variant must exercise the real, compiled `insertEvents`, which
+// has the real table name baked into its SQL, so routing it at a different
+// table would mean measuring code the app doesn't run. Instead, the harness
+// deletes exactly the synthetic rows it inserted, identified by the
+// disjoint device_id range above, after every run. This keeps every variant
+// -- including `current` -- writing to the real table with its real
+// indexes (so the measurement stays representative), while leaving no
+// residue behind. `events` holds only synthetic benchmark/test data and the
+// test suite already truncates it routinely, so this is safe.
+async function cleanupBenchRows(ctx) {
+  const result = await ctx.pool.query('DELETE FROM events WHERE device_id >= $1', [BENCH_DEVICE_ID_FLOOR]);
+  return result.rowCount;
+}
+
 async function main() {
   const args = process.argv.slice(2);
-  const mode = (args.find((a) => a.startsWith('--mode=')) || '--mode=variants').split('=')[1];
-  const reps = Number((args.find((a) => a.startsWith('--reps=')) || `--reps=${DEFAULT_REPS}`).split('=')[1]);
+  const modeArg = (args.find((a) => a.startsWith('--mode=')) || '--mode=variants').split('=')[1];
+  const repsArg = (args.find((a) => a.startsWith('--reps=')) || `--reps=${DEFAULT_REPS}`).split('=')[1];
+
+  // MINOR fix: validate both. `--mode=step` (singular, a plausible typo)
+  // previously fell through silently to the variants branch, and a
+  // non-numeric --reps produced NaN that surfaced only much later as a
+  // confusing TypeError deep in the loop.
+  if (modeArg !== 'steps' && modeArg !== 'variants') {
+    console.error(`Invalid --mode=${modeArg}; expected "steps" or "variants"`);
+    process.exit(1);
+  }
+  const reps = Number(repsArg);
+  if (!Number.isInteger(reps) || reps <= 0) {
+    console.error(`Invalid --reps=${repsArg}; expected a positive integer`);
+    process.exit(1);
+  }
+  const mode = modeArg;
 
   if (!process.env.DATABASE_URL) {
     console.error('DATABASE_URL is required');
@@ -151,27 +262,44 @@ async function main() {
   console.log(`rows per batch: ${ROWS_PER_BATCH}, reps: ${reps}`);
 
   try {
-    // Warm the pool and the plan cache; a cold first call is not representative.
-    await runVariants(ctx, ['current'], 5);
+    // Warm every variant (MINOR fix), not just `current`. `prepared` in
+    // particular has a one-time Parse per physical connection for its named
+    // statement; warming only `current` left every other variant, including
+    // `prepared`, to pay a cold first call inside the timed run. Note this
+    // is a best-effort warmup, not a guarantee: pg.Pool holds up to 10
+    // connections by default, and a named statement's parsed plan is cached
+    // per physical connection, so WARMUP_REPS interleaved reps may not
+    // reach every connection the timed run later draws. Any residual cold
+    // start is at least spread across the run instead of concentrated
+    // entirely in one variant.
+    // NOTE: warmup device IDs must also be >= BENCH_DEVICE_ID_FLOOR, or the
+    // cleanup below will not catch them and every invocation leaks
+    // WARMUP_REPS * variant-count * ROWS_PER_BATCH rows -- precisely the
+    // pollution this fix exists to prevent, just relocated to warmup.
+    await runVariants(ctx, Object.keys(VARIANTS), WARMUP_REPS, BENCH_DEVICE_ID_FLOOR);
+    await cleanupBenchRows(ctx); // warmup rows are also synthetic; do not leave them either
 
     if (mode === 'steps') {
       const samples = [];
       for (let i = 0; i < reps; i += 1) {
-        samples.push(await stepBreakdown(ctx, makeBatch(9500 + i, ROWS_PER_BATCH)));
+        samples.push(await stepBreakdown(ctx, makeBatch(BENCH_DEVICE_ID_FLOOR + 500 + i, ROWS_PER_BATCH)));
       }
       for (const key of ['begin', 'build', 'insert', 'commit']) {
-        console.log(`  ${key.padEnd(7)} median ${median(samples.map((s) => s[key])).toFixed(3)} ms`);
+        console.log(`  ${key.padEnd(7)} ${fmtStats(stats(samples.map((s) => s[key])))}`);
       }
-      const total = median(samples.map((s) => s.begin + s.build + s.insert + s.commit));
-      console.log(`  ${'TOTAL'.padEnd(7)} median ${total.toFixed(3)} ms`);
+      const totals = samples.map((s) => s.begin + s.build + s.insert + s.commit);
+      console.log(`  ${'TOTAL'.padEnd(7)} ${fmtStats(stats(totals))}`);
     } else {
       const names = Object.keys(VARIANTS);
-      const timings = await runVariants(ctx, names, reps);
+      const timings = await runVariants(ctx, names, reps, BENCH_DEVICE_ID_FLOOR);
       for (const name of names) {
-        const m = median(timings[name]);
-        console.log(`  ${name.padEnd(9)} median ${m.toFixed(3)} ms/batch  =>  ${Math.round((ROWS_PER_BATCH / m) * 1000).toLocaleString()} events/sec`);
+        const s = stats(timings[name]);
+        console.log(`  ${name.padEnd(9)} ${fmtStats(s)}  =>  ${Math.round((ROWS_PER_BATCH / s.median) * 1000).toLocaleString()} events/sec (median)`);
       }
     }
+
+    const deleted = await cleanupBenchRows(ctx);
+    console.log(`cleanup: deleted ${deleted} synthetic bench rows (device_id >= ${BENCH_DEVICE_ID_FLOOR})`);
   } finally {
     await pool.end();
   }
