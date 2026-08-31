@@ -202,15 +202,16 @@ events in PostgreSQL, with Redis holding batch-level idempotency keys:
 - **Sustained ingest: 23,195 events/sec (Phase 6) -> 23,757 events/sec median,
   no measurable end-to-end win (Phase 9).** Phase 6's original figure was the
   median of three runs at load average 7.02 / 8.10 / 8.02 (23,195 / 23,876 /
-  18,653 events/sec), against ~120,786 pre-existing rows in `events` left over
-  from later phases' acceptance runs -- table conditions Phase 6 did not
-  record. Method both times: 500 simulated devices at 50 events/sec for 30s
-  into a Release gateway (`--batch-size=100 --batch-age-ms=200`), throughput
-  measured as rows committed divided by wall time, after a discarded warmup
-  run. Phase 9 re-ran this method with the pre-change backend (commit
-  `be90766`) and the post-change backend interleaved A,B,A,B,A,B, `events`
+  18,653 events/sec); its own table conditions (row count, index size) were
+  never recorded, so the two headline figures are not presented as perfectly
+  controlled against each other. Method both times: 500 simulated devices at
+  50 events/sec for 30s into a Release gateway (`--batch-size=100
+  --batch-age-ms=200`), throughput measured as rows committed divided by wall
+  time, after a discarded warmup run. Phase 9 re-ran this method with the
+  pre-change backend (commit `be90766`) and the post-change backend
+  interleaved A,B,A,B,A,B, `events`
   truncated before every run for a controlled comparison, at load average
-  2.85-4.26: before 23,810 / 23,893 / 23,774 (median **23,810**), after
+  2.99-4.26: before 23,810 / 23,893 / 23,774 (median **23,810**), after
   23,757 / 23,757 / 23,761 (median **23,757**) -- a **-0.2% change, i.e. no
   measurable win** at this offered rate (500 devices x 50/sec = 25,000
   events/sec offered, and both arms land within ~5% of that ceiling). This is
