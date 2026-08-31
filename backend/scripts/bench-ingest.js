@@ -280,9 +280,35 @@ async function cleanupBenchRows(ctx) {
 // named index relations; it does not touch heap/table bloat (already
 // reclaimed by autovacuum) and it never deletes or modifies rows, so the
 // live acceptance-run rows below BENCH_DEVICE_ID_FLOOR are untouched.
+//
+// Failure handling (final whole-branch review): a failed REINDEX ... CONCURRENTLY
+// does NOT reproduce the silent-skip hazard migration 002 documents -- the
+// rebuild happens under a suffixed `_ccnew` name while the original keeps its
+// name and stays valid, so the table is never left without a usable index. But
+// it does leave an INVALID `_ccnew` sibling behind, which consumes disk and adds
+// write-maintenance overhead to every later INSERT into `events` -- from this
+// harness, the app, or the test suite, all of which share this table -- until a
+// human drops it. Unlike the one-shot migration, this runs on EVERY invocation,
+// so the failure is worth naming loudly with its remediation rather than letting
+// a bare stack trace imply the table is untouched. The error is rethrown: a run
+// whose physical baseline was not restored must not go on to report timings.
 async function reindexBenchIndexes(ctx) {
-  await ctx.pool.query('REINDEX INDEX CONCURRENTLY events_pkey');
-  await ctx.pool.query('REINDEX INDEX CONCURRENTLY events_device_id_timestamp_id_idx');
+  for (const index of ['events_pkey', 'events_device_id_timestamp_id_idx']) {
+    try {
+      await ctx.pool.query(`REINDEX INDEX CONCURRENTLY ${index}`);
+    } catch (error) {
+      console.error(
+        `\nREINDEX of ${index} failed: ${error.message}\n` +
+          `An INVALID "${index}_ccnew" index may have been left behind. Check with:\n` +
+          `  SELECT c.relname, i.indisvalid FROM pg_class c JOIN pg_index i\n` +
+          `    ON i.indexrelid = c.oid WHERE c.relname LIKE '${index}%';\n` +
+          `and if one is present and invalid, reclaim it with:\n` +
+          `  DROP INDEX CONCURRENTLY ${index}_ccnew;\n` +
+          `Timings from this run are not comparable to others until that is done.\n`,
+      );
+      throw error;
+    }
+  }
 }
 
 // Prints live row count plus heap/index/total size so physical drift is
