@@ -68,15 +68,28 @@ export class EventsRepository {
     client.on('error', onClientError);
 
     try {
+      const groups = chunk(rows, MAX_ROWS_PER_STATEMENT);
+
+      // A single INSERT is already atomic, so wrapping one in BEGIN/COMMIT buys
+      // nothing and costs two round trips on a critical path the gateway walks
+      // one request at a time. The transaction is kept for the multi-statement
+      // case, where all-or-nothing genuinely needs it -- a partial batch would
+      // be re-sent by the sink after its 503 and stored twice.
+      if (groups.length === 1) {
+        await this.insertChunk(client, groups[0]);
+        return rows.length;
+      }
+
       await client.query('BEGIN');
-      for (const group of chunk(rows, MAX_ROWS_PER_STATEMENT)) {
+      for (const group of groups) {
         await this.insertChunk(client, group);
       }
       await client.query('COMMIT');
       return rows.length;
     } catch (error) {
       // Rollback is itself best-effort: if the connection is already gone the
-      // original error is the one worth surfacing.
+      // original error is the one worth surfacing. Harmless on the
+      // single-statement path, where there is no open transaction to undo.
       await client.query('ROLLBACK').catch(() => undefined);
       throw error;
     } finally {
@@ -147,7 +160,7 @@ export class EventsRepository {
   }
 
   private async insertChunk(
-    client: { query: (text: string, values: unknown[]) => Promise<unknown> },
+    client: { query: (config: unknown) => Promise<unknown> },
     rows: EventRow[],
   ): Promise<void> {
     const values: unknown[] = [];
@@ -171,10 +184,16 @@ export class EventsRepository {
 
     // Parameterised throughout: the values are device-supplied and must never
     // be interpolated into SQL.
-    await client.query(
-      'INSERT INTO events (device_id, timestamp, temperature, battery, latitude, longitude, event_type) VALUES ' +
+    //
+    // Named so Postgres parses and plans this once per connection instead of
+    // on every request. The name carries the row count because the text does:
+    // pg treats a name bound to two different texts as an error.
+    await client.query({
+      name: `insert_events_${rows.length}`,
+      text:
+        'INSERT INTO events (device_id, timestamp, temperature, battery, latitude, longitude, event_type) VALUES ' +
         tuples.join(', '),
       values,
-    );
+    });
   }
 }

@@ -199,13 +199,36 @@ The gateway can POST batches to a NestJS service that validates them and stores
 events in PostgreSQL, with Redis holding batch-level idempotency keys:
 `--sink=http --sink-url=http://host:port/v1/events`.
 
-- **Sustained ingest: 23,195 events/sec** (median of three runs, load average
-  7.02 / 8.10 / 8.02 at run start), against the gateway's ~200,000 events/sec
-  saturation knee from Phase 4. The three runs were 23,195 / 23,876 / 18,653
-  events/sec; the low one is the run during which background load climbed to
-  11.83. Method: 500 simulated devices at 50 events/sec for 30s into a Release
-  gateway (`--batch-size=100 --batch-age-ms=200`), throughput measured as rows
-  committed divided by wall time, after a discarded warmup run.
+- **Sustained ingest: 23,195 events/sec (Phase 6) -> 23,757 events/sec median,
+  no measurable end-to-end win (Phase 9).** Phase 6's original figure was the
+  median of three runs at load average 7.02 / 8.10 / 8.02 (23,195 / 23,876 /
+  18,653 events/sec); its own table conditions (row count, index size) were
+  never recorded, so the two headline figures are not presented as perfectly
+  controlled against each other. Method both times: 500 simulated devices at
+  50 events/sec for 30s into a Release gateway (`--batch-size=100
+  --batch-age-ms=200`), throughput measured as rows committed divided by wall
+  time, after a discarded warmup run. Phase 9 re-ran this method with the
+  pre-change backend (commit `be90766`) and the post-change backend
+  interleaved A,B,A,B,A,B, `events`
+  truncated before every run for a controlled comparison, at load average
+  2.99-4.26: before 23,810 / 23,893 / 23,774 (median **23,810**), after
+  23,757 / 23,757 / 23,761 (median **23,757**) -- a **-0.2% change, i.e. no
+  measurable win** at this offered rate (500 devices x 50/sec = 25,000
+  events/sec offered, and both arms land within ~5% of that ceiling). This is
+  despite Tasks 2-3 (dropping the redundant transaction, then naming the
+  prepared statement) measuring an **18-19% latency cut in the isolated
+  database write path** (`backend/scripts/bench-ingest.js`, `notxn`/`prepared`
+  vs `current`, attribution below) -- a real, reproducible saving that does not
+  show up end to end because the write path is a minority of the full
+  per-request critical path: two Redis round trips, NDJSON parsing and HTTP
+  overhead are untouched by this phase and were never in scope. A single
+  supplementary run at 500 devices x 150/sec (75,000 events/sec offered,
+  genuinely saturating both arms -- `batches_dropped_outbound` > 0 in both) did
+  surface the win: 49,448 -> 51,292 events/sec, **+3.7%**. `insert` execution
+  dominates the write path at 63-66%; fsync is only 10.8-18.1% of it (measured
+  against a matched `sync`/`nosync` control), which is why Postgres/WAL sizing
+  (Phase 9 Task 5) was skipped rather than attempted. Full write-up:
+  `docs/superpowers/progress/2026-08-30-phase9-ingest-latency-progress.md`.
 - **The ceiling is real, not an artifact of the offered load.** Tripling the
   offer to 75,000 events/sec did not move it: the backend stored 23,324 and
   22,427 events/sec on two runs at comparable load, while the gateway's
