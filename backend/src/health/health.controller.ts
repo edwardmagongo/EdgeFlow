@@ -28,4 +28,13 @@ export class HealthController {
       counters: this.metrics.snapshot(),
     };
   }
+
+  // Deliberately touches nothing. The ALB health check calls this: with one
+  // ECS task and one shared RDS instance, failing the check on a database
+  // outage would deregister the only target and turn the backend's own
+  // retryable 503s into CloudFront 502s, without routing around anything.
+  @Get('live')
+  live() {
+    return { status: 'live' };
+  }
 }
