@@ -6,6 +6,10 @@ target_include_directories(edgeflow-gateway-lib PUBLIC include)
 target_link_libraries(edgeflow-gateway-lib PUBLIC
     edgeflow-core
     Boost::system
+    # The sink terminates TLS itself so --sink-url can name an https:// endpoint.
+    # PUBLIC because http_sink.hpp is what consumers include.
+    OpenSSL::SSL
+    OpenSSL::Crypto
     Threads::Threads
 )
 

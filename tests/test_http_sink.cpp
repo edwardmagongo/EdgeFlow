@@ -721,3 +721,85 @@ TEST(HttpSink, ConcurrencyOneMatchesTheSingleThreadedContract) {
     EXPECT_EQ(server.request_count(), 2u);
     EXPECT_EQ(stats.snapshot().batches_sent, 2u);
 }
+
+// --- TLS (Finding 10) -------------------------------------------------------
+//
+// Phase 5 rejected https:// outright because TLS was a non-goal. Phase 11 then
+// deployed the backend behind CloudFront with the ALB admitting only
+// CloudFront's prefix list, so the only way in is HTTPS. Each decision was
+// right alone; together they left the gateway unable to reach the very backend
+// this project deploys.
+
+TEST(HttpSink, AcceptsAnHttpsUrl) {
+    edgeflow::Stats stats;
+    HttpSink::Options options;
+    options.url = "https://example.invalid/v1/events";
+    options.concurrency = 1;
+
+    // Construction parses the URL. It must no longer reject the scheme the
+    // deployment actually requires.
+    EXPECT_NO_THROW({ HttpSink sink(std::move(options), stats); });
+}
+
+TEST(HttpSink, StillRejectsAnUnsupportedScheme) {
+    edgeflow::Stats stats;
+    HttpSink::Options options;
+    options.url = "ftp://example.invalid/v1/events";
+    options.concurrency = 1;
+
+    EXPECT_THROW({ HttpSink sink(std::move(options), stats); }, std::invalid_argument);
+}
+
+// The test that proves TLS is real rather than a scheme the parser now waves
+// through. The stub speaks plaintext HTTP; an https:// sink pointed at it must
+// fail the handshake and give up, NOT deliver the batch. If this ever reports a
+// batch sent, the gateway is putting telemetry on the wire in the clear while
+// claiming otherwise -- which is worse than the rejection it replaced.
+TEST(HttpSink, DoesNotFallBackToCleartextWhenTheUrlIsHttps) {
+    StubHttpServer server;
+    server.script({{StubAction::Ok, std::chrono::milliseconds(0)}});
+    edgeflow::Stats stats;
+
+    {
+        HttpSink::Options options;
+        options.url = "https://127.0.0.1:" + std::to_string(server.port()) + "/batches";
+        options.concurrency = 1;
+        options.max_retries = 0;
+        options.backoff_base = std::chrono::milliseconds(1);
+        options.timeout = std::chrono::milliseconds(1500);
+        HttpSink sink(std::move(options), stats);
+        sink.consume(sample_batch());
+    }
+
+    EXPECT_EQ(stats.snapshot().batches_sent, 0u);
+    EXPECT_EQ(stats.snapshot().batches_dropped_exhausted, 1u);
+}
+
+// Disabled by default: it needs the public internet, and ctest must stay
+// hermetic. This is the test that actually closes Finding 10 -- everything
+// above proves the sink refuses to downgrade, not that it can complete a real
+// handshake. Run it deliberately:
+//
+//   ./tests/edgeflow-tests --gtest_also_run_disabled_tests \
+//       --gtest_filter='HttpSink.DISABLED_ReachesARealHttpsEndpoint'
+//
+// A 2xx here means the whole chain worked: SNI, certificate verification
+// against the system trust store, the handshake, and an HTTP exchange over the
+// encrypted stream. That is exactly what a CloudFront endpoint requires, so it
+// stands in for the deployed backend without needing the stack to be up.
+TEST(HttpSink, DISABLED_ReachesARealHttpsEndpoint) {
+    edgeflow::Stats stats;
+
+    {
+        HttpSink::Options options;
+        options.url = "https://postman-echo.com/post";
+        options.concurrency = 1;
+        options.max_retries = 1;
+        options.timeout = std::chrono::milliseconds(15000);
+        HttpSink sink(std::move(options), stats);
+        sink.consume(sample_batch());
+    }
+
+    EXPECT_EQ(stats.snapshot().batches_sent, 1u);
+    EXPECT_EQ(stats.snapshot().batches_dropped_exhausted, 0u);
+}

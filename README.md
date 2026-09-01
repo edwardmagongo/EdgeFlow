@@ -314,7 +314,9 @@ Micro-benchmarks are medians of 9 repetitions; macro rows medians of 3.
 
 The gateway can POST batches to a NestJS service that validates them and stores
 events in PostgreSQL, with Redis holding batch-level idempotency keys:
-`--sink=http --sink-url=http://host:port/v1/events`.
+`--sink=http --sink-url=http://host:port/v1/events`, or
+`--sink-url=https://<distribution>.cloudfront.net/v1/events` against the
+deployed stack.
 
 - **Sustained ingest: 23,195 events/sec (Phase 6) -> 23,757 events/sec median,
   no measurable end-to-end win (Phase 9).** Phase 6's original figure was the
@@ -589,6 +591,14 @@ The gateway can POST batches to an HTTP endpoint instead of writing them to a
 file: `--sink=http --sink-url=http://host:port/path`. The body is NDJSON,
 **byte-identical to what `FileSink` writes**, so a file can be replayed to the
 backend with plain `curl`.
+
+`https://` URLs are supported and terminate TLS in the sink itself: the server
+certificate is verified against the system trust store, the hostname is checked
+against it, and SNI is sent so a multi-tenant edge such as CloudFront can select
+a certificate. The port defaults to 443 for `https://` and 80 for `http://`. An
+unverifiable certificate fails the batch -- there is no downgrade to cleartext.
+This is what lets the gateway reach the AWS deployment, whose only entry point
+is HTTPS.
 
 - **End to end, nothing is lost while the backend is healthy.** 1000 devices at
   50 events/sec for 20s: 938,191 events accepted, 9,430 batches sent, and the

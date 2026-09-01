@@ -48,7 +48,11 @@ namespace edgeflow::gateway {
 class HttpSink : public edgeflow::Sink {
 public:
     struct Options {
-        std::string url;                                    // http://host:port/path
+        // http://host:port/path or https://host:port/path. Under https the
+        // sink verifies the server certificate against the system trust store
+        // and sends SNI, so it can talk to a managed endpoint such as
+        // CloudFront directly.
+        std::string url;
         std::size_t outbound_capacity = 256;                // in batches
         std::size_t concurrency = 4;                        // sink threads draining the queue
         edgeflow::BackpressurePolicy backpressure =
@@ -111,6 +115,7 @@ private:
         std::string host;
         std::string port;
         std::string path;
+        bool use_tls = false;
     };
     static Target parse_url(const std::string& url);
 

@@ -19,6 +19,19 @@ endif()
 include(cmake/Dependencies.cmake)
 find_package(Boost 1.75 CONFIG REQUIRED COMPONENTS system)
 
+# TLS for the HTTP sink. macOS ships LibreSSL as its system "openssl", which
+# Boost.Asio's SSL layer does not fully track, so prefer Homebrew's OpenSSL 3
+# when the caller has not already pinned one.
+if(APPLE AND NOT DEFINED OPENSSL_ROOT_DIR)
+    foreach(candidate /opt/homebrew/opt/openssl@3 /usr/local/opt/openssl@3)
+        if(EXISTS ${candidate})
+            set(OPENSSL_ROOT_DIR ${candidate})
+            break()
+        endif()
+    endforeach()
+endif()
+find_package(OpenSSL REQUIRED)
+
 enable_testing()
 
 add_subdirectory(core)

@@ -1,8 +1,12 @@
 #include "edgeflow/gateway/http_sink.hpp"
 
 #include <boost/asio.hpp>
+#include <boost/asio/ssl.hpp>
 #include <boost/beast/core.hpp>
 #include <boost/beast/http.hpp>
+#include <boost/beast/ssl.hpp>
+// For SSL_set_tlsext_host_name, which Asio does not wrap.
+#include <openssl/ssl.h>
 #include <algorithm>
 #include <cstdio>
 #include <optional>
@@ -28,7 +32,18 @@ namespace {
 // parallelised -- the change would undo itself.
 struct PersistentConnection {
     boost::asio::io_context io_context;
+    // Exactly one of these is engaged at a time, chosen by the URL's scheme.
+    // Two optionals rather than a variant because the connect paths differ
+    // (TLS adds a handshake) while the request path does not -- the exchange
+    // below is a generic lambda over whichever stream is live.
     std::optional<beast::tcp_stream> stream;
+    std::optional<beast::ssl_stream<beast::tcp_stream>> tls_stream;
+    // Built on first TLS use and kept for the thread's lifetime: loading the
+    // system trust store is expensive and must not be paid per batch. Held per
+    // connection (so per thread) rather than shared, which keeps this free of
+    // cross-thread lifetime questions for the cost of one CA load per sink
+    // thread at startup.
+    std::optional<boost::asio::ssl::context> tls_context;
     // Lives with the connection, not the call: Beast's async_read may pull
     // bytes off the socket beyond the current response into this buffer. On a
     // fresh-per-call buffer those trailing bytes would be silently discarded
@@ -38,13 +53,32 @@ struct PersistentConnection {
     // previous, unrelated socket.
     beast::flat_buffer buffer;
 
-    bool live() const { return stream.has_value(); }
+    bool live() const { return stream.has_value() || tls_stream.has_value(); }
+
+    // The TCP layer underneath whichever stream is live. expires_after() is a
+    // property of that layer, so the timeout handling is identical for both.
+    beast::tcp_stream& transport() {
+        return tls_stream ? beast::get_lowest_layer(*tls_stream) : *stream;
+    }
 
     // Any transport error drops the connection so the NEXT attempt reconnects.
     // A backend that closed an idle keep-alive socket must cost one batch's
     // retry, never be mistaken for a backend failure -- that distinction is the
     // whole risk of keep-alive and it is handled here.
     void drop() {
+        if (tls_stream) {
+            // Deliberately no async_shutdown(): a TLS close_notify is a round
+            // trip, and this path is reached exactly when the peer is already
+            // unresponsive or the deadline has fired. Waiting for a courtesy
+            // exchange there would reintroduce the hang expires_after() exists
+            // to prevent. Closing the transport is sufficient -- the batch is
+            // retried on a fresh connection either way.
+            beast::error_code ignored;
+            beast::get_lowest_layer(*tls_stream).socket().shutdown(tcp::socket::shutdown_both,
+                                                                  ignored);
+            beast::get_lowest_layer(*tls_stream).close();
+            tls_stream.reset();
+        }
         if (stream) {
             beast::error_code ignored;
             stream->socket().shutdown(tcp::socket::shutdown_both, ignored);
@@ -87,14 +121,30 @@ HttpSink::HttpSink(Options options, edgeflow::Stats& stats)
 HttpSink::~HttpSink() { stop(); }
 
 HttpSink::Target HttpSink::parse_url(const std::string& url) {
-    // Deliberately minimal: http:// only, no auth, no query. TLS is a non-goal
-    // of this phase, so an https:// URL is rejected loudly rather than silently
-    // treated as plaintext.
-    static constexpr const char* kPrefix = "http://";
-    if (url.rfind(kPrefix, 0) != 0) {
-        throw std::invalid_argument("--sink-url must start with http:// , got: " + url);
+    // Deliberately minimal: http:// or https://, no auth, no query.
+    //
+    // https:// was rejected outright through Phase 10, when TLS was a stated
+    // non-goal. Phase 11 then put the backend behind CloudFront with the ALB
+    // admitting only CloudFront's prefix list, which left the sink unable to
+    // reach the deployment this project ships. The scheme is now honoured
+    // rather than refused, and it selects a real TLS connection -- never a
+    // silent downgrade to plaintext.
+    static constexpr const char* kPlain = "http://";
+    static constexpr const char* kTls = "https://";
+
+    bool use_tls = false;
+    std::size_t prefix_length = 0;
+    if (url.rfind(kTls, 0) == 0) {
+        use_tls = true;
+        prefix_length = std::string(kTls).size();
+    } else if (url.rfind(kPlain, 0) == 0) {
+        prefix_length = std::string(kPlain).size();
+    } else {
+        throw std::invalid_argument("--sink-url must start with http:// or https:// , got: " +
+                                    url);
     }
-    const std::string rest = url.substr(std::string(kPrefix).size());
+
+    const std::string rest = url.substr(prefix_length);
     const std::size_t slash = rest.find('/');
     const std::string authority = rest.substr(0, slash);
     if (authority.empty()) {
@@ -102,11 +152,12 @@ HttpSink::Target HttpSink::parse_url(const std::string& url) {
     }
 
     Target target;
+    target.use_tls = use_tls;
     target.path = (slash == std::string::npos) ? "/" : rest.substr(slash);
     const std::size_t colon = authority.find(':');
     if (colon == std::string::npos) {
         target.host = authority;
-        target.port = "80";
+        target.port = use_tls ? "443" : "80";
     } else {
         target.host = authority.substr(0, colon);
         target.port = authority.substr(colon + 1);
@@ -193,8 +244,40 @@ HttpSink::SendOutcome HttpSink::send_once(const OutboundBatch& batch) {
         if (resolve_error) {
             return SendOutcome::RetryableFailure;
         }
-        connection.stream.emplace(connection.io_context);
-        connection.stream->expires_after(options_.timeout);
+        if (target_.use_tls && !connection.tls_context) {
+            namespace ssl = boost::asio::ssl;
+            connection.tls_context.emplace(ssl::context::tls_client);
+            // Verify the chain against the system trust store, and verify that
+            // the certificate actually names the host we asked for. Without the
+            // second check the first is close to worthless: any certificate
+            // signed by any trusted CA would pass.
+            boost::system::error_code trust_error;
+            connection.tls_context->set_default_verify_paths(trust_error);
+            if (trust_error) {
+                // No usable CA store means nothing can be verified. Fail the
+                // batch rather than fall back to an unverified connection.
+                connection.tls_context.reset();
+                return SendOutcome::RetryableFailure;
+            }
+            connection.tls_context->set_verify_mode(ssl::verify_peer);
+        }
+
+        if (target_.use_tls) {
+            connection.tls_stream.emplace(connection.io_context, *connection.tls_context);
+            // SNI. CloudFront and every other host that serves many names off
+            // one address needs this to pick a certificate at all; without it
+            // the handshake fails or yields the wrong chain.
+            if (SSL_set_tlsext_host_name(connection.tls_stream->native_handle(),
+                                         target_.host.c_str()) != 1) {
+                connection.drop();
+                return SendOutcome::RetryableFailure;
+            }
+            connection.tls_stream->set_verify_callback(
+                boost::asio::ssl::host_name_verification(target_.host));
+        } else {
+            connection.stream.emplace(connection.io_context);
+        }
+        connection.transport().expires_after(options_.timeout);
         // async_connect, not the synchronous connect() overload: per the
         // comment above (and confirmed against basic_stream.hpp -- the sync
         // overload forwards straight to a plain net::connect() with no timer
@@ -204,7 +287,7 @@ HttpSink::SendOutcome HttpSink::send_once(const OutboundBatch& batch) {
         // timeout, undermining the bounded-shutdown guarantee HttpSink::stop()
         // depends on.
         boost::system::error_code connect_error;
-        connection.stream->async_connect(
+        connection.transport().async_connect(
             endpoints, [&](beast::error_code error, const tcp::endpoint&) {
                 connect_error = error;
             });
@@ -215,10 +298,30 @@ HttpSink::SendOutcome HttpSink::send_once(const OutboundBatch& batch) {
             connection.drop();
             return SendOutcome::RetryableFailure;
         }
+
+        if (target_.use_tls) {
+            // The handshake is its own async operation and needs its own
+            // run(), so the io_context is restarted between the two. It runs
+            // under the same expires_after() deadline set before connect --
+            // deliberately, since a peer that completes the TCP handshake and
+            // then stalls mid-negotiation is exactly the hang this bounds.
+            connection.io_context.restart();
+            beast::error_code handshake_error;
+            connection.tls_stream->async_handshake(
+                boost::asio::ssl::stream_base::client,
+                [&](beast::error_code error) { handshake_error = error; });
+            connection.io_context.run();
+            if (handshake_error) {
+                // Covers an untrusted chain, a name mismatch, and a plaintext
+                // server that never speaks TLS at all. All retryable as far as
+                // this sink can tell, and none of them fall back to cleartext.
+                connection.drop();
+                return SendOutcome::RetryableFailure;
+            }
+        }
     }
 
-    beast::tcp_stream& stream = *connection.stream;
-    stream.expires_after(options_.timeout);
+    connection.transport().expires_after(options_.timeout);
 
     http::request<http::string_body> request{http::verb::post, target_.path, 11};
     request.set(http::field::host, target_.host);
@@ -241,18 +344,30 @@ HttpSink::SendOutcome HttpSink::send_once(const OutboundBatch& batch) {
     // steps, so a backend that stalls at either point is caught. Connect is
     // no longer part of this call on a reused connection -- it already
     // happened, possibly batches ago.
-    http::async_write(stream, request, [&](beast::error_code write_error, std::size_t) {
-        if (write_error) {
-            failure = write_error;
-            return;
-        }
-        http::async_read(stream, connection.buffer, response,
-                         [&](beast::error_code read_error, std::size_t) {
-                             if (read_error) {
-                                 failure = read_error;
-                             }
-                         });
-    });
+    // Generic over the stream type: Beast's async_write/async_read take any
+    // AsyncStream, and ssl_stream is one. Writing this once rather than twice
+    // keeps the plaintext and TLS paths from drifting -- the timeout, the
+    // buffer reuse and the error handling below are shared by construction.
+    const auto exchange = [&](auto& active_stream) {
+        http::async_write(active_stream, request,
+                          [&](beast::error_code write_error, std::size_t) {
+                              if (write_error) {
+                                  failure = write_error;
+                                  return;
+                              }
+                              http::async_read(active_stream, connection.buffer, response,
+                                               [&](beast::error_code read_error, std::size_t) {
+                                                   if (read_error) {
+                                                       failure = read_error;
+                                                   }
+                                               });
+                          });
+    };
+    if (connection.tls_stream) {
+        exchange(*connection.tls_stream);
+    } else {
+        exchange(*connection.stream);
+    }
     connection.io_context.run();
 
     if (failure) {
