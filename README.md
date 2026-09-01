@@ -51,7 +51,8 @@ Gateway flags: `--port`, `--workers`, `--queue-capacity`, `--backpressure`
 HTTP sink flags: `--sink` (`file`|`http`), `--sink-url`,
 `--sink-outbound-capacity` (batches held for the backend, default 256),
 `--sink-backpressure` (governs the *outbound* queue, separately from
-`--backpressure` which governs the event queue), `--sink-max-retries`,
+`--backpressure` which governs the event queue), `--sink-concurrency` (sink
+threads draining the outbound queue, default 4, max 1024), `--sink-max-retries`,
 `--sink-backoff-ms`, `--sink-timeout-ms`. Plain HTTP only -- no TLS, no auth.
 
 In another terminal, run ~1,000 simulated devices for 15 seconds:
@@ -243,15 +244,24 @@ events in PostgreSQL, with Redis holding batch-level idempotency keys:
   separate `git worktree`, after arm at HEAD; interleaved A,B,A,B,A,B, `events`
   truncated before every run, one discarded warmup, load average 2.75-4.87
   across the six timed runs. Before: 49,625 / 50,792 / 51,502 (median
-  **50,792**), matching zero-drop saturation every run (`batches_dropped_outbound`
-  4,487-4,911 per run). After: 64,732 / 69,727 / 65,780 (median **65,780**), with
-  **zero drops in all three after-arm runs** -- at this offered rate the sink is
-  no longer the constraint that saturates the pipeline; what actually bound the
-  after arm was the single-threaded load generator's own send rate sharing the
-  same 10-core machine (Phase 4 documented this as a standing, machine-specific
-  lower bound). So 65,780 is a floor on the concurrent sink's ceiling, not a
-  measurement of it. **Against the arithmetic prediction:** Phase 9's
-  supplementary run implied one thread caps out near ~51,300 events/sec at
+  **50,792**), genuinely saturated every run (`batches_dropped_outbound`
+  4,487-4,911 per run -- the sink could not keep up with what was offered).
+  After: 64,732 / 69,727 / 65,780 (median **65,780**), with **zero drops in all
+  three after-arm runs** -- at this offered rate the sink is no longer the
+  constraint that saturates the pipeline; what actually bound the after arm was
+  the single-threaded load generator's own send rate sharing the same 10-core
+  machine (Phase 4 documented this as a standing, machine-specific lower
+  bound). So 65,780 is a floor on the concurrent sink's ceiling, not a
+  measurement of it. **The +29.5% is itself sensitive to where the generator
+  landed**, because with zero drops the after arm's "throughput" *is* the
+  generator's offered rate (64,800 / 69,780 / 65,835 events/sec) rather than a
+  sink limit: the one pair measured at essentially identical offered volume
+  (2,092,474 vs 2,093,395 events sent) gives +37.3%, not +29.5%. The figure
+  that does not move with generator variance is delivered/offered -- **78.2% /
+  76.6% / 77.0% before, 100% / 100% / 100% after**. Read the +29.5% as the
+  conservative end of a range, not a point estimate. **Against the arithmetic
+  prediction:** Phase 9's supplementary run implied one thread caps out near
+  ~51,300 events/sec at
   ~1.95ms/round-trip, derived from a single run per arm; Task 1's harness
   measured the round trip directly instead (median 0.278-0.757ms across three
   non-outlier runs against the live backend, `wait`-for-first-byte 73.9-88.3%

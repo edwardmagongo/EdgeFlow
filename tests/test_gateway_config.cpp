@@ -1,8 +1,11 @@
 #include <gtest/gtest.h>
 #include <stdexcept>
+#include <string>
+#include <vector>
 #include "edgeflow/gateway/config.hpp"
 
 using edgeflow::BackpressurePolicy;
+using edgeflow::gateway::kMaxSinkConcurrency;
 using edgeflow::gateway::parse_args;
 
 TEST(GatewayConfig, DefaultsAreSane) {
@@ -165,4 +168,24 @@ TEST(GatewayConfig, RejectsZeroSinkConcurrency) {
     char concurrency[] = "--sink-concurrency=0";
     char* argv[] = {prog, concurrency};
     EXPECT_THROW(parse_args(2, argv), std::invalid_argument);
+}
+
+// The ceiling matters as much as the floor: without it, a value this large
+// makes std::thread's constructor throw partway through HttpSink's spawn loop,
+// which aborts the process instead of reporting the bad flag.
+TEST(GatewayConfig, RejectsSinkConcurrencyAboveTheCeiling) {
+    char prog[] = "edgeflow-gateway";
+    char concurrency[] = "--sink-concurrency=100000";
+    char* argv[] = {prog, concurrency};
+    EXPECT_THROW(parse_args(2, argv), std::invalid_argument);
+}
+
+TEST(GatewayConfig, AcceptsSinkConcurrencyExactlyAtTheCeiling) {
+    char prog[] = "edgeflow-gateway";
+    const std::string flag = "--sink-concurrency=" + std::to_string(kMaxSinkConcurrency);
+    std::vector<char> flag_buffer(flag.begin(), flag.end());
+    flag_buffer.push_back('\0');
+    char* argv[] = {prog, flag_buffer.data()};
+    auto config = parse_args(2, argv);
+    EXPECT_EQ(config.sink_concurrency, kMaxSinkConcurrency);
 }

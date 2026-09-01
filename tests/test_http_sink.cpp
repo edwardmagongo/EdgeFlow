@@ -486,12 +486,14 @@ TEST(HttpSink, GivesUpOnARequestThatExceedsTheTimeout) {
 }
 
 TEST(HttpSink, ATimeoutIsRetryable) {
-    // The stub handles connections SEQUENTIALLY, so its delay blocks every
-    // later request too, not just the one it is answering. The numbers below
-    // are chosen around that: the first response is slow enough to blow a
-    // 150ms deadline, but the backoff is long enough that the stub is free
-    // again by the time the retry arrives. Making the first delay much larger
-    // would simply starve every retry and test nothing.
+    // The stub serves each CONNECTION on its own thread (Task 2), but a retry
+    // reuses the same persistent connection (Task 3) and therefore the same
+    // handler thread -- so the first response's delay still blocks the retry
+    // behind it. The numbers below are chosen around that: the first response
+    // is slow enough to blow a 150ms deadline, but the backoff is long enough
+    // that the handler is free again by the time the retry arrives. Making the
+    // first delay much larger would simply starve every retry and test
+    // nothing.
     StubHttpServer server;
     server.script({{StubAction::Ok, std::chrono::milliseconds(300)},
                    {StubAction::Ok, std::chrono::milliseconds(0)}});

@@ -67,8 +67,20 @@ HttpSink::HttpSink(Options options, edgeflow::Stats& stats)
     // BoundedQueue is a mutex-guarded deque, so multiple consumers are already
     // safe; Stats is entirely std::atomic. Neither needed a change.
     threads_.reserve(options_.concurrency);
-    for (std::size_t i = 0; i < options_.concurrency; ++i) {
-        threads_.emplace_back([this] { run(); });
+    try {
+        for (std::size_t i = 0; i < options_.concurrency; ++i) {
+            threads_.emplace_back([this] { run(); });
+        }
+    } catch (...) {
+        // A constructor that throws never runs ~HttpSink(), so the threads
+        // already spawned would be destroyed while still joinable by
+        // ~vector<std::thread>, and that calls std::terminate() -- turning a
+        // reportable failure (std::thread out of resources at a large
+        // --sink-concurrency) into an abort. stop() applies the same drain and
+        // join the destructor would have, so the original exception can
+        // propagate as an ordinary error instead.
+        stop();
+        throw;
     }
 }
 
@@ -314,19 +326,27 @@ bool HttpSink::send_with_retries(const OutboundBatch& batch) {
 }
 
 void HttpSink::stop() {
-    if (stopped_) {
+    // exchange, not a plain read-then-write: stop() is public and documented
+    // idempotent, and the destructor also calls it. A plain bool made that
+    // promise good only for a single calling thread.
+    if (stopped_.exchange(true)) {
         return;
     }
-    stopped_ = true;
     drain_deadline_ = std::chrono::steady_clock::now() + kDrainDeadline;
     draining_.store(true, std::memory_order_release);
-    // shutdown() makes pop() return nullopt once the queue is drained, so the
-    // sink thread finishes the backlog rather than abandoning it -- bounded by
-    // the deadline checked in run().
     outbound_.shutdown();
     // Join ALL sink threads. shutdown() makes pop() return nullopt once the
     // queue is drained, so every thread finishes the backlog rather than
-    // abandoning it -- bounded by the deadline checked in run().
+    // abandoning it.
+    //
+    // The deadline bounds when a thread STARTS another batch, not when it
+    // finishes one: run() checks it before entering send_with_retries(), which
+    // never re-checks it. A batch that enters the send path just under the
+    // deadline can therefore hold stop() for one more worst-case retry chain
+    // (with production defaults, 4 x --sink-timeout-ms plus backoff) on top of
+    // kDrainDeadline. Tightening that means re-checking the deadline per retry
+    // attempt; it is deliberately left alone here rather than changed without
+    // a test that can observe it.
     //
     // drain_deadline_ is written BEFORE draining_ is stored with release, and
     // run() reads it only after an acquire load of draining_. That ordering is

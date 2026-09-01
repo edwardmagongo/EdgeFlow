@@ -127,7 +127,7 @@ private:
     std::atomic<bool> draining_{false};
     std::chrono::steady_clock::time_point drain_deadline_{};
     std::vector<std::thread> threads_;
-    bool stopped_ = false;
+    std::atomic<bool> stopped_{false};
 };
 
 } // namespace edgeflow::gateway

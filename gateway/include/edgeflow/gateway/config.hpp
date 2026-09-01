@@ -9,6 +9,12 @@ namespace edgeflow::gateway {
 // Which Sink implementation the gateway constructs at startup.
 enum class SinkKind { File, Http };
 
+// Ceiling on --sink-concurrency. Generous relative to any plausible core count
+// (the sink is I/O-bound, so oversubscribing a little is reasonable and
+// oversubscribing a lot is pointless), but low enough that the value can never
+// reach std::thread's own resource limit inside HttpSink's spawn loop.
+inline constexpr std::size_t kMaxSinkConcurrency = 1024;
+
 struct Config {
     std::uint16_t port = 9000;
     std::size_t workers = 4;

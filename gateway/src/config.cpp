@@ -84,6 +84,16 @@ Config parse_args(int argc, char** argv) {
     if (config.sink_concurrency == 0) {
         throw std::invalid_argument("--sink-concurrency must be at least 1");
     }
+    // Upper bound, not just a lower one. The sink is I/O-bound (Phase 10's
+    // attribution put `wait` at 73.9-88.3% of the round trip), so a thread
+    // count far above the core count buys nothing -- while an absurd value
+    // makes std::thread's constructor throw partway through HttpSink's spawn
+    // loop, which is a startup abort rather than a legible error. Reject it
+    // here, where the flag can still be reported by name.
+    if (config.sink_concurrency > kMaxSinkConcurrency) {
+        throw std::invalid_argument("--sink-concurrency must be at most " +
+                                    std::to_string(kMaxSinkConcurrency));
+    }
     return config;
 }
 
