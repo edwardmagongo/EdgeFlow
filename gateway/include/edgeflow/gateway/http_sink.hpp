@@ -19,11 +19,19 @@ namespace edgeflow::gateway {
 // A Sink that POSTs each batch to an HTTP endpoint as NDJSON.
 //
 // consume() does NO network I/O. It serialises the batch and pushes it onto the
-// OUTBOUND QUEUE, then returns. A dedicated thread drains that queue and does
-// the round trips. Worker threads therefore never block on the backend, which
-// keeps queue-wait latency a measure of EdgeFlow rather than of the backend --
-// the same reason Phase 1 put Batcher::flush() on its own thread instead of the
-// reactor.
+// OUTBOUND QUEUE, then returns. N dedicated threads (Options::concurrency) drain
+// that queue and do the round trips. Worker threads therefore never block on
+// the backend, which keeps queue-wait latency a measure of EdgeFlow rather than
+// of the backend -- the same reason Phase 1 put Batcher::flush() on its own
+// thread instead of the reactor.
+//
+// Concurrency is safe here because each batch carries its own idempotency key,
+// minted once in consume() (see next_idempotency_key). Two threads sending two
+// batches never contend, and a RETRY of one batch stays inside that batch's own
+// send_with_retries call on one thread. What concurrency does change is ARRIVAL
+// ORDER: batches may commit out of creation order, so row id order no longer
+// tracks batch order. The query API sorts by (timestamp, id) on device-supplied
+// timestamps, which this does not affect.
 //
 // Two queues now exist in the gateway. This one is the OUTBOUND QUEUE; the one
 // carrying TimedEvents into the worker pool is the EVENT QUEUE.
@@ -42,6 +50,7 @@ public:
     struct Options {
         std::string url;                                    // http://host:port/path
         std::size_t outbound_capacity = 256;                // in batches
+        std::size_t concurrency = 4;                        // sink threads draining the queue
         edgeflow::BackpressurePolicy backpressure =
             edgeflow::BackpressurePolicy::DropOldest;
         std::size_t max_retries = 3;                        // attempts AFTER the first
@@ -57,7 +66,7 @@ public:
 
     void consume(const std::vector<edgeflow::Event>& batch) override;
 
-    // Drains the outbound queue, then joins the sink thread. Idempotent, and
+    // Drains the outbound queue, then joins the sink threads. Idempotent, and
     // called by the destructor.
     void stop();
 
@@ -91,8 +100,9 @@ private:
     // Batcher -- worker threads and the periodic flush thread both do. Batcher
     // happens to call the sink callback under its own mutex today, but that is
     // Batcher's internal detail rather than part of the Sink contract, so this
-    // does not lean on it. Note this deliberately does NOT use jitter_rng_,
-    // which is documented as sink-thread-only.
+    // does not lean on it. Note this deliberately does NOT use the jitter
+    // generator in send_with_retries, which is thread_local and only ever
+    // touched by sink threads.
     std::string next_idempotency_key();
     static std::string make_key_prefix();
 
@@ -110,16 +120,13 @@ private:
     edgeflow::BoundedQueue<OutboundBatch> outbound_;
     const std::string key_prefix_ = make_key_prefix();
     std::atomic<std::uint64_t> key_counter_{0};
-    // Jitter source for backoff. Only the sink thread touches it, so it needs
-    // no synchronisation.
-    std::mt19937 jitter_rng_{std::random_device{}()};
     // How long stop() will spend draining before abandoning the backlog. Long
     // enough for a healthy backend to finish, short enough that an unreachable
     // one cannot hang gateway shutdown.
     static constexpr std::chrono::seconds kDrainDeadline{5};
     std::atomic<bool> draining_{false};
     std::chrono::steady_clock::time_point drain_deadline_{};
-    std::thread thread_;
+    std::vector<std::thread> threads_;
     bool stopped_ = false;
 };
 

@@ -144,3 +144,25 @@ TEST(GatewayConfig, RejectsAZeroOutboundCapacity) {
     char* argv[] = {prog, capacity};
     EXPECT_THROW(parse_args(2, argv), std::invalid_argument);
 }
+
+TEST(GatewayConfig, ParsesSinkConcurrency) {
+    char prog[] = "edgeflow-gateway";
+    char concurrency[] = "--sink-concurrency=8";
+    char* argv[] = {prog, concurrency};
+    auto config = parse_args(2, argv);
+    EXPECT_EQ(config.sink_concurrency, 8u);
+}
+
+TEST(GatewayConfig, DefaultsSinkConcurrencyToFour) {
+    char prog[] = "edgeflow-gateway";
+    char* argv[] = {prog};
+    auto config = parse_args(1, argv);
+    EXPECT_EQ(config.sink_concurrency, 4u);
+}
+
+TEST(GatewayConfig, RejectsZeroSinkConcurrency) {
+    char prog[] = "edgeflow-gateway";
+    char concurrency[] = "--sink-concurrency=0";
+    char* argv[] = {prog, concurrency};
+    EXPECT_THROW(parse_args(2, argv), std::invalid_argument);
+}

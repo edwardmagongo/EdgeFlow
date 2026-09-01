@@ -80,6 +80,10 @@ public:
         return bodies_.size();
     }
 
+    std::size_t connection_count() const {
+        return connections_accepted_.load();
+    }
+
     void stop() {
         if (stopped_.exchange(true)) return;
         // Wake the blocking accept() by connecting to ourselves, so the serve
@@ -117,6 +121,11 @@ private:
     }
 
     void serve() {
+        // One thread per accepted connection. The stub must not serialize
+        // connections: it is the instrument for testing a CONCURRENT sink, and
+        // a serializing instrument would make a concurrency test pass while
+        // proving nothing.
+        std::vector<std::thread> connections;
         while (true) {
             boost::system::error_code error;
             tcp::socket socket(io_context_);
@@ -124,11 +133,33 @@ private:
             // Checked AFTER accept returns: stop() wakes us with a throwaway
             // connection, which must not be treated as a real request.
             if (error || stopped_.load()) break;
+            connections_accepted_.fetch_add(1, std::memory_order_relaxed);
+            connections.emplace_back(
+                [this, socket = std::move(socket)]() mutable { handle(std::move(socket)); });
+        }
+        // Join before closing the acceptor so no handler outlives the server.
+        for (auto& connection : connections) {
+            if (connection.joinable()) connection.join();
+        }
+        // The acceptor is only ever closed by the thread that accepts on it.
+        boost::system::error_code ignored;
+        acceptor_.close(ignored);
+    }
 
-            beast::flat_buffer buffer;
+    void handle(tcp::socket socket) {
+        // Loop: a real backend serves many requests over one keep-alive
+        // connection, and the sink under test now relies on exactly that. A
+        // stub that closed after every reply would defeat client-side
+        // keep-alive regardless of what the sink does, so this keeps the
+        // connection open across requests the same way, closing only when the
+        // client closes it, the script says to hang up, or the response asks
+        // for a close.
+        beast::flat_buffer buffer;
+        while (true) {
+            boost::system::error_code error;
             http::request<http::string_body> request;
             http::read(socket, buffer, request, error);
-            if (error) continue;
+            if (error) return; // client closed or reset the connection
 
             auto content_type = request[http::field::content_type];
             auto idempotency_key = request["Idempotency-Key"];
@@ -140,7 +171,7 @@ private:
             }
             if (response.action == StubAction::CloseWithoutReply) {
                 socket.shutdown(tcp::socket::shutdown_both, error);
-                continue;
+                return;
             }
 
             http::response<http::string_body> reply{status_for(response.action),
@@ -151,13 +182,14 @@ private:
                 reply.set(http::field::location, "http://127.0.0.1:1/elsewhere");
             }
             reply.body() = "";
+            reply.keep_alive(request.keep_alive());
             reply.prepare_payload();
             http::write(socket, reply, error);
-            socket.shutdown(tcp::socket::shutdown_both, error);
+            if (error || !request.keep_alive()) {
+                socket.shutdown(tcp::socket::shutdown_both, error);
+                return;
+            }
         }
-        // The acceptor is only ever closed by the thread that accepts on it.
-        boost::system::error_code ignored;
-        acceptor_.close(ignored);
     }
 
     static http::status status_for(StubAction action) {
@@ -177,6 +209,7 @@ private:
     std::uint16_t port_ = 0;
     std::thread thread_;
     std::atomic<bool> stopped_{false};
+    std::atomic<std::size_t> connections_accepted_{0};
 
     mutable std::mutex mutex_;
     std::vector<StubResponse> script_;

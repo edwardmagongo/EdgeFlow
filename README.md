@@ -229,6 +229,47 @@ events in PostgreSQL, with Redis holding batch-level idempotency keys:
   against a matched `sync`/`nosync` control), which is why Postgres/WAL sizing
   (Phase 9 Task 5) was skipped rather than attempted. Full write-up:
   `docs/superpowers/progress/2026-08-30-phase9-ingest-latency-progress.md`.
+- **Concurrent HTTP sink: 50,792 -> 65,780 events/sec median at saturation,
+  +29.5% (Phase 10).** Phase 9's own "Limits" section named the single-in-flight
+  sink thread as the next bottleneck -- one dedicated thread waiting for each
+  response before sending the next, capping throughput at `batch_size /
+  round_trip_time` no matter how cheap the backend gets. Phase 10 removed that:
+  the sink now drains its outbound queue with `--sink-concurrency` threads
+  (default 4, matching `--workers`), each reusing one persistent connection
+  instead of opening a fresh TCP connection per batch. Measured at the same
+  saturating rate Phase 9's supplementary run used, 500 devices x 150/sec
+  (75,000 events/sec offered) for 30s, before arm built from the pre-Task-3
+  commit (`be3872f`, single-threaded sink, one connection per batch) in a
+  separate `git worktree`, after arm at HEAD; interleaved A,B,A,B,A,B, `events`
+  truncated before every run, one discarded warmup, load average 2.75-4.87
+  across the six timed runs. Before: 49,625 / 50,792 / 51,502 (median
+  **50,792**), matching zero-drop saturation every run (`batches_dropped_outbound`
+  4,487-4,911 per run). After: 64,732 / 69,727 / 65,780 (median **65,780**), with
+  **zero drops in all three after-arm runs** -- at this offered rate the sink is
+  no longer the constraint that saturates the pipeline; what actually bound the
+  after arm was the single-threaded load generator's own send rate sharing the
+  same 10-core machine (Phase 4 documented this as a standing, machine-specific
+  lower bound). So 65,780 is a floor on the concurrent sink's ceiling, not a
+  measurement of it. **Against the arithmetic prediction:** Phase 9's
+  supplementary run implied one thread caps out near ~51,300 events/sec at
+  ~1.95ms/round-trip, derived from a single run per arm; Task 1's harness
+  measured the round trip directly instead (median 0.278-0.757ms across three
+  non-outlier runs against the live backend, `wait`-for-first-byte 73.9-88.3%
+  of it, i.e. I/O-bound, which is what opened the concurrency gate). A naive 4x
+  of ~51,300 would predict roughly 205,000 events/sec; the measured **+29.5%**
+  is far short of that, exactly as the design spec anticipated -- once the sink
+  itself stops serializing, something else becomes the limit before a clean
+  N-fold gain can show up end to end, and on this run that something was the
+  generator, not yet Postgres (Phase 4's ~200,000 events/sec gateway knee is
+  itself a lower bound and was never approached). At Phase 6's original rate
+  (500 devices x 50/sec, secondary continuity check only, headroom-capped
+  ~4.8% per the design spec's own framing since the pipeline was already near
+  the offered rate before this phase): before median 22,814 (22,809 / 22,814 /
+  22,820), after median 22,775 (22,763 / 22,775 / 22,779), essentially flat
+  (-0.17%) with zero drops in either arm -- not evidence about concurrency,
+  reported only for continuity with every figure published since Phase 6. Full
+  write-up:
+  `docs/superpowers/progress/2026-08-31-phase10-concurrent-sink-progress.md`.
 - **The ceiling is real, not an artifact of the offered load.** Tripling the
   offer to 75,000 events/sec did not move it: the backend stored 23,324 and
   22,427 events/sec on two runs at comparable load, while the gateway's

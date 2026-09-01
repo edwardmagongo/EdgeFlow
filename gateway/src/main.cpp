@@ -51,6 +51,7 @@ int main(int argc, char** argv) {
             edgeflow::gateway::HttpSink::Options sink_options;
             sink_options.url = config.sink_url;
             sink_options.outbound_capacity = config.sink_outbound_capacity;
+            sink_options.concurrency = config.sink_concurrency;
             sink_options.backpressure = config.sink_backpressure;
             sink_options.max_retries = config.sink_max_retries;
             sink_options.backoff_base = config.sink_backoff_ms;

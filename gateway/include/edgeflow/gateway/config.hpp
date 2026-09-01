@@ -23,6 +23,7 @@ struct Config {
     SinkKind sink_kind = SinkKind::File;
     std::string sink_url;
     std::size_t sink_outbound_capacity = 256;
+    std::size_t sink_concurrency = 4;
     edgeflow::BackpressurePolicy sink_backpressure = edgeflow::BackpressurePolicy::DropOldest;
     std::size_t sink_max_retries = 3;
     std::chrono::milliseconds sink_backoff_ms{100};
