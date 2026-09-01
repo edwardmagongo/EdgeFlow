@@ -30,3 +30,13 @@ foreach(variant IN ITEMS "mutex" "lockfree")
         target_compile_definitions(${target} PRIVATE EDGEFLOW_USE_LOCK_FREE_QUEUE)
     endif()
 endforeach()
+
+# Phase 10 Task 1 attribution harness. A standalone diagnostic, deliberately
+# NOT linked into the gateway and NOT part of any ctest suite -- it needs a
+# live backend to mean anything.
+add_executable(edgeflow-bench-sink src/bench_sink_roundtrip.cpp)
+target_link_libraries(edgeflow-bench-sink PRIVATE
+    edgeflow-core
+    Boost::system
+    Threads::Threads
+)
