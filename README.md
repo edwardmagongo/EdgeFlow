@@ -17,11 +17,9 @@ of it. Phase 11 adds reviewable Terraform and a deploy runbook for AWS
 verified end-to-end: the dashboard and the API served through one CloudFront
 distribution, backed by RDS Postgres and ElastiCache Redis. Whether an
 environment is running at any given moment depends on whether `terraform
-destroy` has been run since; the evidence is in
-`docs/superpowers/progress/2026-09-01-docker-aws-deployment-progress.md`.
-Each phase has its own spec under `docs/superpowers/specs/` and a plan under
-`docs/superpowers/plans/`; Phases 2-6 also have a task-by-task execution log
-under `docs/superpowers/progress/`.
+destroy` has been run since. Measured results for every phase are in
+`docs/benchmarks.md` and `docs/saturation.md`, with the headline figures and
+their method summarised under "Benchmarks" below.
 
 ## Build
 
@@ -346,8 +344,8 @@ deployed stack.
   surface the win: 49,448 -> 51,292 events/sec, **+3.7%**. `insert` execution
   dominates the write path at 63-66%; fsync is only 10.8-18.1% of it (measured
   against a matched `sync`/`nosync` control), which is why Postgres/WAL sizing
-  (Phase 9 Task 5) was skipped rather than attempted. Full write-up:
-  `docs/superpowers/progress/2026-08-30-phase9-ingest-latency-progress.md`.
+  (Phase 9 Task 5) was skipped rather than attempted. Full tables:
+  `docs/benchmarks.md`.
 - **Concurrent HTTP sink: 50,792 -> 65,780 events/sec median at saturation,
   +29.5% (Phase 10).** Phase 9's own "Limits" section named the single-in-flight
   sink thread as the next bottleneck -- one dedicated thread waiting for each
@@ -396,8 +394,7 @@ deployed stack.
   22,820), after median 22,775 (22,763 / 22,775 / 22,779), essentially flat
   (-0.17%) with zero drops in either arm -- not evidence about concurrency,
   reported only for continuity with every figure published since Phase 6. Full
-  write-up:
-  `docs/superpowers/progress/2026-08-31-phase10-concurrent-sink-progress.md`.
+  tables: `docs/benchmarks.md`.
 - **The ceiling is real, not an artifact of the offered load.** Tripling the
   offer to 75,000 events/sec did not move it: the backend stored 23,324 and
   22,427 events/sec on two runs at comparable load, while the gateway's

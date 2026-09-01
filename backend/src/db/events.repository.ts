@@ -102,8 +102,7 @@ export class EventsRepository {
 
   // Keyset pagination: the cursor bounds (timestamp, id) directly rather than
   // an OFFSET, so a concurrent insert anywhere in the table cannot cause an
-  // already-returned row to repeat or a not-yet-returned row to be skipped --
-  // see docs/superpowers/specs/2026-08-29-phase7-events-query-api-design.md.
+  // already-returned row to repeat or a not-yet-returned row to be skipped.
   // Scope: this guarantee covers rows already fetched or present at query
   // time. A row inserted mid-pagination with a timestamp behind the reader's
   // current cursor position is not guaranteed to appear on a later page --

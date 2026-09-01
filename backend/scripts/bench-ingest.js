@@ -13,7 +13,7 @@
 // being measured. Fixed by adding a `sync` control variant that is
 // byte-for-byte identical to `nosync` except for the flag value, and
 // comparing `nosync` against `sync` (not against `current`) to isolate
-// fsync's cost. See docs/superpowers/sdd/task-1-report.md, "Fix round".
+// fsync's cost.
 //
 // CORRECTION (second fix round, post-review): DELETE-based cleanup restored
 // row counts but not physical index size -- a mass insert+delete cycle
@@ -22,8 +22,7 @@
 // maintenance is part of what `insert` measures. Fixed by REINDEXing the
 // two `events` indexes after cleanup on every run, and by printing the
 // table's row count and index size every run so drift is visible without a
-// separate query. See docs/superpowers/sdd/task-1-report.md, "Second fix
-// round".
+// separate query.
 const { Pool } = require('pg');
 const { EventsRepository } = require('../dist/db/events.repository');
 

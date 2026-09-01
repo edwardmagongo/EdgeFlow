@@ -1,6 +1,9 @@
 .worktrees/
 build*/
 __pycache__/
+
+# Local agent/editor tooling. Never part of the project.
+.claude/
 .superpowers/
 
 # macOS Finder metadata. Created in any directory the Finder opens, so it
