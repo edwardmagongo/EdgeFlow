@@ -2,3 +2,13 @@
 build*/
 __pycache__/
 .superpowers/
+
+# Terraform. .terraform/ is ~670MB of provider binaries. State files are
+# excluded because terraform.tfstate holds the random_password-generated RDS
+# password in plaintext; .terraform.lock.hcl is deliberately NOT ignored, since
+# pinning provider hashes is the point of it.
+infra/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+crash.log
