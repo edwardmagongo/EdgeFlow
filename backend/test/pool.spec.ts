@@ -39,4 +39,27 @@ describe('pgPoolProvider', () => {
     const result = await pool.query('SELECT 1 AS n');
     expect(result.rows[0].n).toBe(1);
   });
+
+  // Task 8's acceptance run revoked the RDS security group's ingress rule and
+  // found that GET /v1/health did not respond at all -- it neither reported
+  // "database": false nor errored. A revoked rule drops packets rather than
+  // refusing connections, so without a bound pg waits forever and the query
+  // never returns to reach the endpoint's own try/catch.
+  //
+  // 192.0.2.1 is TEST-NET-1 (RFC 5737): routable nowhere, so a connection
+  // attempt hangs here exactly the way it hung against RDS.
+  it('rejects rather than hanging when Postgres is unreachable', async () => {
+    const original = process.env.DATABASE_URL;
+    process.env.DATABASE_URL = 'postgres://edgeflow:edgeflow@192.0.2.1:5432/edgeflow';
+
+    try {
+      pool = (pgPoolProvider as { useFactory: () => Pool }).useFactory();
+
+      const startedAt = Date.now();
+      await expect(pool.query('SELECT 1')).rejects.toThrow(/timeout/i);
+      expect(Date.now() - startedAt).toBeLessThan(8_000);
+    } finally {
+      process.env.DATABASE_URL = original;
+    }
+  });
 });
