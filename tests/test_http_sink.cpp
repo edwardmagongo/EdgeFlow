@@ -78,6 +78,44 @@ TEST(StubHttpServer, CloseWithoutReplyLooksLikeATransportFailure) {
     EXPECT_EQ(server.request_count(), 1u) << "the request should still have been read";
 }
 
+TEST(StubHttpServer, HandlesOverlappingConnectionsConcurrently) {
+    StubHttpServer server;
+    // Every reply waits 200ms. Served concurrently, four requests take ~200ms
+    // total; served one at a time they take ~800ms.
+    server.script({StubResponse{StubAction::Ok, std::chrono::milliseconds(200)}});
+
+    constexpr std::size_t kClients = 4;
+    const auto started = std::chrono::steady_clock::now();
+    std::vector<std::thread> clients;
+    for (std::size_t i = 0; i < kClients; ++i) {
+        clients.emplace_back([&server] {
+            boost::asio::io_context io_context;
+            tcp::socket socket(io_context);
+            boost::system::error_code error;
+            socket.connect(
+                tcp::endpoint(boost::asio::ip::make_address("127.0.0.1"), server.port()),
+                error);
+            ASSERT_FALSE(error);
+            http::request<http::string_body> request{http::verb::post, "/batches", 11};
+            request.set(http::field::host, "127.0.0.1");
+            request.body() = "x\n";
+            request.prepare_payload();
+            http::write(socket, request, error);
+            beast::flat_buffer buffer;
+            http::response<http::string_body> response;
+            http::read(socket, buffer, response, error);
+        });
+    }
+    for (auto& client : clients) client.join();
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - started);
+
+    EXPECT_EQ(server.request_count(), kClients);
+    // Serialized would be ~800ms. Half of that is a wide margin that still
+    // cannot be reached without real concurrency.
+    EXPECT_LT(elapsed, std::chrono::milliseconds(200 * kClients / 2));
+}
+
 #include "edgeflow/file_sink.hpp"
 #include "edgeflow/gateway/http_sink.hpp"
 #include "edgeflow/stats.hpp"

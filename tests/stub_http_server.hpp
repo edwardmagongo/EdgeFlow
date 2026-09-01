@@ -117,6 +117,11 @@ private:
     }
 
     void serve() {
+        // One thread per accepted connection. The stub must not serialize
+        // connections: it is the instrument for testing a CONCURRENT sink, and
+        // a serializing instrument would make a concurrency test pass while
+        // proving nothing.
+        std::vector<std::thread> connections;
         while (true) {
             boost::system::error_code error;
             tcp::socket socket(io_context_);
@@ -124,40 +129,49 @@ private:
             // Checked AFTER accept returns: stop() wakes us with a throwaway
             // connection, which must not be treated as a real request.
             if (error || stopped_.load()) break;
-
-            beast::flat_buffer buffer;
-            http::request<http::string_body> request;
-            http::read(socket, buffer, request, error);
-            if (error) continue;
-
-            auto content_type = request[http::field::content_type];
-            auto idempotency_key = request["Idempotency-Key"];
-            record(request.body(), std::string(content_type), std::string(idempotency_key));
-
-            const StubResponse response = next_response();
-            if (response.delay.count() > 0) {
-                std::this_thread::sleep_for(response.delay);
-            }
-            if (response.action == StubAction::CloseWithoutReply) {
-                socket.shutdown(tcp::socket::shutdown_both, error);
-                continue;
-            }
-
-            http::response<http::string_body> reply{status_for(response.action),
-                                                    request.version()};
-            reply.set(http::field::server, "edgeflow-stub");
-            reply.set(http::field::content_type, "text/plain");
-            if (response.action == StubAction::Redirect) {
-                reply.set(http::field::location, "http://127.0.0.1:1/elsewhere");
-            }
-            reply.body() = "";
-            reply.prepare_payload();
-            http::write(socket, reply, error);
-            socket.shutdown(tcp::socket::shutdown_both, error);
+            connections.emplace_back(
+                [this, socket = std::move(socket)]() mutable { handle(std::move(socket)); });
+        }
+        // Join before closing the acceptor so no handler outlives the server.
+        for (auto& connection : connections) {
+            if (connection.joinable()) connection.join();
         }
         // The acceptor is only ever closed by the thread that accepts on it.
         boost::system::error_code ignored;
         acceptor_.close(ignored);
+    }
+
+    void handle(tcp::socket socket) {
+        boost::system::error_code error;
+        beast::flat_buffer buffer;
+        http::request<http::string_body> request;
+        http::read(socket, buffer, request, error);
+        if (error) return;
+
+        auto content_type = request[http::field::content_type];
+        auto idempotency_key = request["Idempotency-Key"];
+        record(request.body(), std::string(content_type), std::string(idempotency_key));
+
+        const StubResponse response = next_response();
+        if (response.delay.count() > 0) {
+            std::this_thread::sleep_for(response.delay);
+        }
+        if (response.action == StubAction::CloseWithoutReply) {
+            socket.shutdown(tcp::socket::shutdown_both, error);
+            return;
+        }
+
+        http::response<http::string_body> reply{status_for(response.action),
+                                                request.version()};
+        reply.set(http::field::server, "edgeflow-stub");
+        reply.set(http::field::content_type, "text/plain");
+        if (response.action == StubAction::Redirect) {
+            reply.set(http::field::location, "http://127.0.0.1:1/elsewhere");
+        }
+        reply.body() = "";
+        reply.prepare_payload();
+        http::write(socket, reply, error);
+        socket.shutdown(tcp::socket::shutdown_both, error);
     }
 
     static http::status status_for(StubAction action) {
