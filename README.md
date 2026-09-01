@@ -1,144 +1,237 @@
 # EdgeFlow
 
-A concurrent C++20 telemetry pipeline: simulated devices → TCP gateway →
-bounded queue → worker pool → batcher → sink.
+[![CI](https://github.com/edwardmagongo/EdgeFlow/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/edwardmagongo/EdgeFlow/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+![C++20](https://img.shields.io/badge/C%2B%2B-20-00599C?logo=cplusplus&logoColor=white)
+![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-4169E1?logo=postgresql&logoColor=white)
+![Tests](https://img.shields.io/badge/C%2B%2B%20tests-185%20passing-brightgreen)
 
-Phases 1-6 have landed: the C++ core pipeline with a file-backed sink
-(Phase 1), a benchmark suite and simulator chaos scenarios (Phase 2), a
-lock-free queue variant benchmarked against the mutex one (Phase 3), a
-saturating load generator that located the gateway's throughput knee
-(Phase 4), an HTTP sink that POSTs NDJSON batches to a backend endpoint
-(Phase 5), and a NestJS ingestion backend that validates those batches and
-stores them in PostgreSQL, with Redis holding batch-level idempotency keys
-(Phase 6). The HTTP sink still talks to any endpoint you point it at. Phase 7
-added a read/query API (`GET /v1/events`) and Phase 8 added a dashboard on top
-of it. Phase 11 adds reviewable Terraform and a deploy runbook for AWS
-(see "Deployment (AWS)" below). It has been applied to a real account and
-verified end-to-end: the dashboard and the API served through one CloudFront
-distribution, backed by RDS Postgres and ElastiCache Redis. Whether an
-environment is running at any given moment depends on whether `terraform
-destroy` has been run since. Measured results for every phase are in
-`docs/benchmarks.md` and `docs/saturation.md`, with the headline figures and
-their method summarised under "Benchmarks" below.
+A concurrent C++20 telemetry pipeline: simulated devices → TCP gateway → bounded
+queue → worker pool → batcher → sink, with a NestJS ingestion backend and a React
+dashboard behind one CloudFront distribution on AWS.
 
-## Build
+The interesting part is not the socket loop — it is what a bounded queue is
+supposed to do when producers outrun consumers. Every backpressure policy here
+(`block`, `drop-oldest`, `drop-newest`) is a different answer to that, the
+throughput knee where they start to matter was located by a saturating load
+generator rather than guessed at, and the lock-free queue that looks obviously
+faster was benchmarked head-to-head against the mutex one instead of being
+assumed to win.
 
-    brew install boost cmake   # macOS prerequisites
-    cmake -S . -B build
-    cmake --build build
+## Highlights
 
-## Test
+- **Backpressure policies measured at saturation, not assumed.** A dedicated
+  saturating load generator finds the gateway's throughput knee and drives each
+  policy past it, so `drop-oldest` and `drop-newest` are characterised by
+  measured loss under real contention rather than by argument. See
+  [Performance](#performance).
+- **The lock-free queue was benchmarked, and the honest answer is "it depends".**
+  A lock-free bounded queue sits behind the same interface as the mutex one and
+  is selectable at runtime, so the two are compared on identical workloads
+  instead of the faster-sounding one being adopted on reputation. See
+  [Performance](#performance).
+- **A concurrent HTTP sink, worth a measured +29.5%.** Latency attribution
+  showed 73.9–88.3% of the sink's round trip was spent waiting on I/O, so the
+  single-in-flight limit was removed and the gain re-measured — the optimisation
+  followed the profile rather than a hunch. See [Performance](#performance).
+- **Idempotency whose failure modes are stated, not hidden.** Batches carry an
+  `Idempotency-Key` backed by Redis; a key commits only after its insert
+  commits, an in-flight retry gets a 503 rather than a false "already stored",
+  and a Redis outage fails *open* — accepting duplicate rows by design, recorded
+  in a counter. See [Ingestion backend](#ingestion-backend).
+- **Deployed to AWS for real, and verified end to end.** Terraform provisions
+  VPC, ECS Fargate, RDS, ElastiCache, ALB, S3 and CloudFront; two scripts ship
+  the code. The gateway's TLS sink has been driven against the live CloudFront
+  endpoint with the backend's counters reconciling exactly against the gateway's
+  own. See [Deployment](#deployment).
+- **185 C++ tests, plus AddressSanitizer and ThreadSanitizer builds** — for a
+  concurrent pipeline, a green test suite that never ran under TSan is not
+  evidence of much. See [Tests](#tests).
 
-    ctest --test-dir build --output-on-failure
+## Table of Contents
 
-Sanitizer builds:
+- [Stack](#stack)
+- [Running it](#running-it)
+- [Architecture](#architecture)
+- [Ingestion backend](#ingestion-backend)
+- [Dashboard](#dashboard)
+- [Health endpoints](#health-endpoints)
+- [Tests](#tests)
+- [Performance](#performance)
+- [Design decisions and limits](#design-decisions-and-limits)
+- [Configuration](#configuration)
+- [Deployment](#deployment)
+- [License](#license)
 
-    cmake -S . -B build-asan -DEDGEFLOW_SANITIZE=address
-    cmake --build build-asan && ctest --test-dir build-asan --output-on-failure
+## Stack
 
-    cmake -S . -B build-tsan -DEDGEFLOW_SANITIZE=thread
-    cmake --build build-tsan && ctest --test-dir build-tsan --output-on-failure
+C++20 · CMake · Boost.Asio · GoogleTest · ASan/TSan · NestJS · TypeScript ·
+PostgreSQL 16 · Redis 7 · React · Vite · Docker · Terraform · AWS (ECS Fargate,
+RDS, ElastiCache, ALB, S3, CloudFront, ECR, Secrets Manager) · GitHub Actions
 
-## Run
+## Running it
 
-Start the gateway:
+Requires CMake, Boost and OpenSSL; Docker and Node.js 22+ for the backend and
+dashboard.
 
-    ./build/gateway/edgeflow-gateway --port=9000 --workers=4 \
-        --queue-capacity=2000 --backpressure=block \
-        --batch-size=100 --batch-age-ms=200 \
-        --sink-file=/tmp/edgeflow_events.ndjson
+```bash
+brew install boost cmake openssl   # macOS prerequisites
+cmake -S . -B build
+cmake --build build
+ctest --test-dir build --output-on-failure   # 185 tests
+```
 
-Gateway flags: `--port`, `--workers`, `--queue-capacity`, `--backpressure`
-(`block`|`drop-oldest`|`drop-newest`), `--batch-size`, `--batch-age-ms`,
-`--sink-file`.
+Start the gateway, writing batches to a file:
 
-HTTP sink flags: `--sink` (`file`|`http`), `--sink-url`,
-`--sink-outbound-capacity` (batches held for the backend, default 256),
-`--sink-backpressure` (governs the *outbound* queue, separately from
-`--backpressure` which governs the event queue), `--sink-concurrency` (sink
-threads draining the outbound queue, default 4, max 1024), `--sink-max-retries`,
-`--sink-backoff-ms`, `--sink-timeout-ms`. Plain HTTP only -- no TLS, no auth.
+```bash
+./build/gateway/edgeflow-gateway --port=9000 --workers=4 \
+    --queue-capacity=2000 --backpressure=block \
+    --batch-size=100 --batch-age-ms=200 \
+    --sink-file=/tmp/edgeflow_events.ndjson
+```
 
 In another terminal, run ~1,000 simulated devices for 15 seconds:
 
-    ./build/simulator/edgeflow-simulator --devices=1000 --rate=1 --duration=15
+```bash
+./build/simulator/edgeflow-simulator --devices=1000 --rate=1 --duration=15
+wc -l /tmp/edgeflow_events.ndjson
+```
 
-Simulator flags: `--host`, `--port`, `--devices`, `--rate` (events/sec per
+Sanitizer builds — the ones that matter for a concurrent pipeline:
+
+```bash
+cmake -S . -B build-asan -DEDGEFLOW_SANITIZE=address
+cmake --build build-asan && ctest --test-dir build-asan --output-on-failure
+
+cmake -S . -B build-tsan -DEDGEFLOW_SANITIZE=thread
+cmake --build build-tsan && ctest --test-dir build-tsan --output-on-failure
+```
+
+## Architecture
+
+```
+simulated devices ──TCP──▶ gateway ──▶ bounded queue ──▶ worker pool
+                                                              │
+                                                              ▼
+                                         sink ◀── batcher ◀───┘
+                                          │
+                              file (NDJSON) or HTTP(S) ──▶ backend ──▶ Postgres
+                                                                  └──▶ Redis
+```
+
+Each connection's events are enqueued onto one bounded queue; a worker pool
+drains it; a batcher groups events by size or age (whichever trips first); a
+sink writes them out. The queue is bounded on purpose — an unbounded one
+converts a throughput problem into an out-of-memory one — so the policy for a
+full queue is an explicit choice rather than an accident:
+
+| `--backpressure` | Behaviour when the queue is full |
+|---|---|
+| `block` | The producing connection waits. No loss; back-pressures the device. |
+| `drop-oldest` | Evicts the oldest queued event. Favours fresh telemetry. |
+| `drop-newest` | Rejects the arriving event. Favours already-accepted work. |
+
+Two queue implementations sit behind one interface: a mutex-guarded bounded
+queue and a lock-free one (`edgeflow-gateway-lockfree`), so they can be compared
+on identical workloads. See [Performance](#performance).
+
+The sink has its own separate outbound queue and backpressure policy, because
+the backend being slow is a different failure from devices being fast, and
+collapsing the two would let a slow backend stall event ingestion.
+
+**Gateway flags:** `--port`, `--workers`, `--queue-capacity`, `--backpressure`
+(`block`|`drop-oldest`|`drop-newest`), `--batch-size`, `--batch-age-ms`,
+`--sink-file`.
+
+**HTTP sink flags:** `--sink` (`file`|`http`), `--sink-url` (`http://` or
+`https://`), `--sink-outbound-capacity` (batches held for the backend, default
+256), `--sink-backpressure` (governs the *outbound* queue, separately from
+`--backpressure`), `--sink-concurrency` (sink threads draining the outbound
+queue, default 4, max 1024), `--sink-max-retries`, `--sink-backoff-ms`,
+`--sink-timeout-ms`.
+
+TLS is terminated in the sink, so `--sink-url` accepts `https://` and verifies
+the certificate chain against the system trust store with SNI. There is no
+authentication — see [Design decisions and limits](#design-decisions-and-limits).
+
+**Simulator flags:** `--host`, `--port`, `--devices`, `--rate` (events/sec per
 device), `--duration` (seconds), `--chaos-latency-ms` (extra per-event send
-delay), `--chaos-packet-loss-percent` (0-100, chance a device skips a send --
+delay), `--chaos-packet-loss-percent` (0-100, chance a device skips a send —
 models a device failing to produce telemetry, not true network packet loss),
-`--chaos-device-spike` + `--chaos-device-spike-at-sec` (add N devices mid-run
-at the given second).
+`--chaos-device-spike` + `--chaos-device-spike-at-sec` (add N devices mid-run at
+the given second), `--threads`.
 
-Inspect the output:
+On shutdown (SIGINT/SIGTERM) the gateway prints its counters — accepted,
+dropped_oldest, dropped_newest, malformed, queue-wait latency, and the sink's
+batch tallies:
 
-    wc -l /tmp/edgeflow_events.ndjson
-    head -n 3 /tmp/edgeflow_events.ndjson
+```
+edgeflow-gateway shut down (accepted=14800, dropped_oldest=0, dropped_newest=0, malformed=0, queue_wait_count=14800, queue_wait_mean_us=17.4695, queue_wait_p50_us=100, queue_wait_p99_us=100)
+```
 
-### Ingestion backend
+`queue_wait_mean_us` is exact; the p50/p99 figures come from a fixed histogram
+whose lowest bucket boundary is 100us, so a reported `p50=100` means "at or
+below 100us", not "exactly 100us".
+
+## Ingestion backend
 
 To store events instead of writing them to a file, start PostgreSQL and Redis,
 apply the migration, and run the backend:
 
-    docker compose up -d
-    cd backend && npm install
-    npm run migrate
-    npm run build && npm start
+```bash
+docker compose up -d
+cd backend && npm install
+npm run migrate
+npm run build && npm start
+```
 
 Then point the gateway at it:
 
-    ./build/gateway/edgeflow-gateway --port=9000 --workers=4 \
-        --sink=http --sink-url=http://127.0.0.1:3000/v1/events \
-        --batch-size=100 --batch-age-ms=200
-
-The service reads four environment variables:
-
-- `DATABASE_URL` (required) -- PostgreSQL connection string.
-- `REDIS_URL` (required) -- Redis connection string.
-- `PORT` (default `3000`) -- the HTTP port to listen on.
-- `IDEMPOTENCY_TTL_SECONDS` (default `900`) -- how long a batch's
-  `Idempotency-Key` is remembered.
+```bash
+./build/gateway/edgeflow-gateway --port=9000 --workers=4 \
+    --sink=http --sink-url=http://127.0.0.1:3000/v1/events \
+    --batch-size=100 --batch-age-ms=200
+```
 
 `docker compose up -d` binds PostgreSQL to host port **5433** and Redis to
 **6380**, not their defaults, so it does not collide with other containers on
 the same machine. Match them:
 
-    export DATABASE_URL=postgres://edgeflow:edgeflow@localhost:5433/edgeflow
-    export REDIS_URL=redis://localhost:6380
+```bash
+export DATABASE_URL=postgres://edgeflow:edgeflow@localhost:5433/edgeflow
+export REDIS_URL=redis://localhost:6380
+```
 
-`POST /v1/events` takes an NDJSON body and an `Idempotency-Key` header (the
-HTTP sink mints one per batch) and replies with the per-batch outcome:
+`POST /v1/events` takes an NDJSON body and an `Idempotency-Key` header (the HTTP
+sink mints one per batch) and replies with the per-batch outcome:
 
-    {"received":5,"stored":5,"skipped":0,"duplicate":false}
-
-`GET /v1/health` reports dependency reachability and seven counters:
-`batches_received`, `batches_duplicate_suppressed`,
-`batches_in_flight_rejected`, `events_stored`, `events_skipped_malformed`,
-`db_failures`, `redis_unavailable`.
+```json
+{"received":5,"stored":5,"skipped":0,"duplicate":false}
+```
 
 Invalid lines are skipped individually rather than failing the batch. If
-PostgreSQL is unreachable the endpoint returns **503**, never a 4xx, so the
-sink retries rather than discarding the batch on the spot. A failed insert
-releases the batch's idempotency key, so that retry is a real retry rather than
-one suppressed as an already-stored duplicate.
+PostgreSQL is unreachable the endpoint returns **503**, never a 4xx, so the sink
+retries rather than discarding the batch on the spot. A failed insert releases
+the batch's idempotency key, so that retry is a real retry rather than one
+suppressed as an already-stored duplicate.
 
 A key is only marked committed once its insert has committed, so
-`"duplicate":true` means the rows are durably stored. A retry that arrives
-while the first attempt is still inserting gets a **503** and is counted under
+`"duplicate":true` means the rows are durably stored. A retry that arrives while
+the first attempt is still inserting gets a **503** and is counted under
 `batches_in_flight_rejected`, rather than being told the batch was already
-stored -- storing it twice and dropping it entirely are both worse than asking
+stored — storing it twice and dropping it entirely are both worse than asking
 the sink to come back.
 
-If Redis is unreachable the idempotency check fails open -- the batch is stored
+If Redis is unreachable the idempotency check fails open — the batch is stored
 rather than rejected, on the reasoning that losing telemetry is worse than
 storing it twice. A Redis outage concurrent with a sink retry therefore admits
-duplicate rows by design, and the only record that it happened is the
+duplicate rows **by design**, and the only record that it happened is the
 `redis_unavailable` counter.
 
 Failing open requires *failing*, not waiting: the client sets
 `disableOfflineQueue`, so a command issued during an outage is rejected at once
 instead of being buffered and replayed when Redis returns. Without it a claim
-does not fail open, it blocks for the length of the outage -- which is worse,
+does not fail open, it blocks for the length of the outage — which is worse,
 because a blocked ingest request burns the sink's entire retry budget and the
 batch is dropped as exhausted. For the same reason the readiness guard tests
 `isReady` rather than `isOpen`: node-redis keeps `isOpen` true for the whole
@@ -147,138 +240,49 @@ reconnect cycle, so `isOpen` reports a usable connection during an outage.
 The connection itself retries indefinitely with an exponential backoff capped at
 2 seconds, in one regime whether or not it has ever connected. An outage ends
 when Redis returns, not when the process restarts, and a Redis that is not up
-yet at boot -- the common case when compose or k8s starts both at once -- is
+yet at boot — the common case when compose or k8s starts both at once — is
 picked up when it appears. Startup never blocks on it: `connect()` waits a
 bounded moment for a first connection and then returns, leaving the retry loop
-running, so a missing Redis costs deduplication rather than the service's
-boot.
+running, so a missing Redis costs deduplication rather than the service's boot.
 
-On shutdown (SIGINT/SIGTERM), the gateway prints its observability counters:
-accepted, dropped_oldest, dropped_newest, and malformed event counts, plus
-queue-wait latency (time from a connection enqueueing an event to a worker
-popping it), e.g.
+## Dashboard
 
-    edgeflow-gateway shut down (accepted=14800, dropped_oldest=0, dropped_newest=0, malformed=0, queue_wait_count=14800, queue_wait_mean_us=17.4695, queue_wait_p50_us=100, queue_wait_p99_us=100)
-
-`queue_wait_mean_us` is exact; the p50/p99 figures come from a fixed
-histogram whose lowest bucket boundary is 100us, so a reported `p50=100`
-means "at or below 100us", not "exactly 100us".
-
-### Dashboard (Phase 8)
-
-A React + Vite single-page app shows the backend's live health counters
-and lets you browse a device's telemetry history:
-
-    cd frontend
-    npm install
-    npm run dev
-
-Open the URL Vite prints (typically `http://localhost:5173`). By default
-it talks to the backend at `http://localhost:3000`; point it elsewhere
-with `VITE_API_BASE_URL`:
-
-    VITE_API_BASE_URL=http://localhost:4000 npm run dev
-
-The backend must have CORS enabled to accept requests from the
-dashboard's origin -- `app.enableCors()` in `backend/src/main.ts` does
-this already, open to any origin, matching the backend's existing
-no-auth posture.
-
-The health strip polls `GET /v1/health` every 5 seconds. The explorer
-queries `GET /v1/events` and paginates with the opaque cursor it
-returns -- "Next"/"Previous" walk forward and backward through pages
-already fetched in the current session, not through page numbers.
-
-## Deployment (AWS)
-
-Terraform under `infra/` provisions one environment (`prod`) in `eu-west-1`.
-One CloudFront distribution fronts both halves of the product: the default
-behavior serves the dashboard's static build from a private S3 bucket, and
-`/v1/*` routes to an internet-facing ALB in front of a single ECS Fargate task
-running the backend. RDS Postgres and ElastiCache Redis sit in private subnets
-reachable only from the ECS security group. HTTPS comes from the
-distribution's own `*.cloudfront.net` certificate -- there is no custom domain
-and no ACM certificate.
-
-Infrastructure and application code are on separate levers: Terraform for the
-former, two scripts for the latter.
-
-**This creates billable resources.** RDS `db.t4g.micro`, ElastiCache
-`cache.t4g.micro`, an ALB and a CloudFront distribution run roughly $40-60 a
-month if left up. `terraform destroy` removes them.
-
-### Prerequisites
+A React + Vite single-page app shows the backend's live health counters and lets
+you browse a device's telemetry history:
 
 ```bash
-aws sts get-caller-identity && terraform version && docker version
+cd frontend
+npm install
+npm run dev
 ```
 
-Credentials need permission to create VPC, ECS, ECR, RDS, ElastiCache, ALB,
-S3, CloudFront, Secrets Manager, IAM and CloudWatch Logs resources. Terraform
-must be >= 1.5.
+Open the URL Vite prints (typically `http://localhost:5173`). By default it
+talks to the backend at `http://localhost:3000`; point it elsewhere with
+`VITE_API_BASE_URL`.
 
-### From a clean account
+The health strip polls `GET /v1/health` every 5 seconds. The explorer queries
+`GET /v1/events` and paginates with the opaque cursor it returns — "Next" and
+"Previous" walk forward and backward through pages already fetched in the
+current session, not through page numbers.
 
-```bash
-cd infra && terraform init && terraform apply
-```
+The backend must have CORS enabled to accept requests from the dashboard's
+origin — `app.enableCors()` in `backend/src/main.ts` does this already, open to
+any origin, matching the backend's existing no-auth posture.
 
-Roughly 12-15 minutes; RDS and CloudFront dominate. The ECS service reports
-tasks failing to pull an image until the first backend deploy, which is
-expected.
+In the deployed stack this is moot: CloudFront serves the dashboard and proxies
+`/v1/*` to the ALB from the same origin, so the bundle uses relative paths and
+no hostname is baked into it.
 
-```bash
-./scripts/deploy-backend.sh    # build, push, migrate, roll
-./scripts/deploy-frontend.sh   # build, sync to S3, invalidate CloudFront
-```
-
-`deploy-backend.sh` tags images with the git SHA rather than `:latest` and
-refuses to build from a dirty tree, so a running task is always traceable to a
-commit and the previous image survives for rollback. Migrations run on every
-deploy as a one-off ECS task, and the service rolls only if that task exits 0
--- new code cannot end up running against an old schema.
-
-### What Terraform stops managing after the first apply
-
-The two levers are deliberate, but the boundary has a sharp edge worth knowing
-before you edit `infra/modules/ecs/main.tf`.
-
-The task definition carries `lifecycle { ignore_changes = [container_definitions] }`
-so Terraform does not fight `deploy-backend.sh` over the image tag. Terraform
-cannot ignore one nested field of a JSON blob, so this ignores the **whole**
-container definition. After the first apply, changing any of these in Terraform
-has no effect at all, silently:
-
-- `stopTimeout`
-- the `PORT` and `IDEMPOTENCY_TTL_SECONDS` environment variables
-- the `secrets` ARNs
-- the log configuration
-
-To change one, either edit it and force a new revision through
-`deploy-backend.sh`, or temporarily remove the `ignore_changes` block, apply, and
-put it back.
-
-Separately, the service carries `ignore_changes = [task_definition]`. `cpu` and
-`memory` sit outside `container_definitions`, so editing those *does* produce a
-new task definition revision -- but the service will not adopt it until the next
-`deploy-backend.sh` run.
-
-### Redeploying the same commit
-
-ECR is set to `IMMUTABLE` tags, which is what makes a git SHA identify exactly
-one image. The cost is that `deploy-backend.sh` cannot push a SHA twice: if a
-deploy fails after the push (a failing migration, say), fixing the cause and
-re-running the script aborts on the push. Make an empty commit
-(`git commit --allow-empty`) and deploy that.
-
-### Health endpoints
+## Health endpoints
 
 Two, deliberately:
 
-- `GET /v1/health` reports dependency reachability and the ingest counters.
-  Its `status` is `"ok"` when both Postgres and Redis are reachable and
-  `"degraded"` when either is not. It answers **200 either way**, so it is a
-  diagnostic to read, not a check to route on.
+- `GET /v1/health` reports dependency reachability and seven ingest counters:
+  `batches_received`, `batches_duplicate_suppressed`,
+  `batches_in_flight_rejected`, `events_stored`, `events_skipped_malformed`,
+  `db_failures`, `redis_unavailable`. Its `status` is `"ok"` when both Postgres
+  and Redis are reachable and `"degraded"` when either is not. It answers **200
+  either way**, so it is a diagnostic to read, not a check to route on.
 - `GET /v1/health/live` reports only that the process is up. This is what the
   ALB target group checks.
 
@@ -286,20 +290,45 @@ A dependency outage bounds rather than blocks `/v1/health`: the pg pool carries
 a 3s `connectionTimeoutMillis`, so an unreachable database reports
 `"database": false` in about three seconds instead of hanging. Without that
 bound a revoked security group rule drops packets, and the query waits forever
-rather than failing -- which is what an earlier acceptance run actually hit.
+rather than failing — which is what an earlier acceptance run actually hit.
 
 The split is not cosmetic. With one ECS task and one shared RDS instance,
 failing the load balancer check on a database outage would deregister the only
 target and turn the backend's own retryable 503s into CloudFront 502s, without
-routing around anything -- there is nothing to route to.
+routing around anything — there is nothing to route to.
 
-### Teardown
+## Tests
 
 ```bash
-cd infra && terraform destroy
+ctest --test-dir build --output-on-failure
 ```
 
-## Benchmarks
+**185 C++ tests across 24 suites** — the queue implementations (both, against
+the same parameterised suite), worker pool, batcher, file and HTTP sinks,
+argument parsing, and the simulator's threading and send-interval logic.
+
+The suite is hermetic: no test touches the network. One test,
+`HttpSink.DISABLED_ReachesARealHttpsEndpoint`, is disabled by default for that
+reason and run deliberately when the real TLS path needs proving:
+
+```bash
+./build/tests/edgeflow-tests --gtest_also_run_disabled_tests \
+    --gtest_filter='HttpSink.DISABLED_ReachesARealHttpsEndpoint'
+```
+
+Because the pipeline is concurrent, the suite is also run under both
+sanitizers — see [Running it](#running-it). A green run that has never been
+under ThreadSanitizer says little about a lock-free queue.
+
+The backend carries its own Jest suite (110 cases across 15 spec files) covering
+the idempotency state machine, the fail-open Redis path, and the ingest
+endpoint's error semantics:
+
+```bash
+cd backend && npm test
+```
+
+## Performance
 
 Real, measured numbers from `scripts/run_benchmarks.py`,
 `scripts/run_saturation_sweep.py`, and
@@ -617,9 +646,11 @@ outbound queue was full) and `batches_dropped_exhausted` (retries ran out, or
 the 5s shutdown drain deadline passed). The two drop counters are separate so a
 backend outage reads differently from a traffic burst.
 
-**The sink speaks plain HTTP with no TLS and no authentication.** It is for a
-trusted network or a local backend only; both belong with the service itself,
-which is a later phase.
+**These figures were measured over plain HTTP.** TLS was added to the sink
+afterwards, so the handshake and encryption costs are not in the numbers above;
+`--sink-url` now accepts `https://` and verifies the chain against the system
+trust store with SNI. There is still no authentication — see
+[Design decisions and limits](#design-decisions-and-limits).
 
 ### Queue comparison (Phase 3, unchanged by Phase 4)
 
@@ -642,3 +673,139 @@ Reproduce: build with `-DCMAKE_BUILD_TYPE=Release`, then
 (around ten minutes) and `python3 scripts/run_benchmarks.py --build-dir build-release`.
 Run them on an otherwise idle machine -- throughput here swings several-fold
 with background load.
+
+## Design decisions and limits
+
+- **No authentication anywhere.** The ingest endpoint, the query API and the
+  dashboard are all open. TLS protects the sink's traffic in transit, but
+  anything that can reach `/v1/events` can write to it. This is a portfolio
+  pipeline, not a service that should face the internet unmodified.
+- **A Redis outage admits duplicate rows, deliberately.** The idempotency check
+  fails open rather than rejecting batches. The counter `redis_unavailable` is
+  the only evidence it happened. The alternative — dropping telemetry during a
+  cache outage — was judged worse.
+- **One environment, one task, one database.** `prod` in `eu-west-1`, a single
+  ECS task, a single RDS instance. There is no multi-AZ failover and no
+  autoscaling, which is why the two health endpoints are split the way they are.
+- **`p50`/`p99` queue-wait figures are bucketed, not exact.** The histogram's
+  lowest boundary is 100us, so `p50=100` means "at or below 100us". Only
+  `queue_wait_mean_us` is exact.
+- **The chaos flag models device failure, not packet loss.**
+  `--chaos-packet-loss-percent` makes a device skip a send; it does not drop
+  TCP segments.
+- **Benchmarks are single-machine.** Gateway and simulator share one host, so
+  the numbers characterise the pipeline, not a network. Run them on an
+  otherwise idle machine.
+- Full measured tables, including method and repetition counts:
+  [`docs/benchmarks.md`](docs/benchmarks.md) and
+  [`docs/saturation.md`](docs/saturation.md).
+
+## Configuration
+
+Backend service:
+
+| Variable | Notes |
+|---|---|
+| `DATABASE_URL` | PostgreSQL connection string. Required. |
+| `REDIS_URL` | Redis connection string. Required. |
+| `PORT` | HTTP port to listen on. Default `3000`. |
+| `IDEMPOTENCY_TTL_SECONDS` | How long a batch's `Idempotency-Key` is remembered. Default `900`. |
+
+Dashboard build:
+
+| Variable | Notes |
+|---|---|
+| `VITE_API_BASE_URL` | Backend origin. Empty in the deployed build on purpose — CloudFront serves the SPA and proxies `/v1/*` from the same origin, so relative paths are correct. |
+
+## Deployment
+
+Terraform under [`infra/`](infra/) provisions one environment (`prod`) in
+`eu-west-1`. One CloudFront distribution fronts both halves of the product: the
+default behaviour serves the dashboard's static build from a private S3 bucket,
+and `/v1/*` routes to an internet-facing ALB in front of a single ECS Fargate
+task. RDS Postgres and ElastiCache Redis sit in private subnets reachable only
+from the ECS security group. HTTPS comes from the distribution's own
+`*.cloudfront.net` certificate — there is no custom domain and no ACM
+certificate.
+
+Infrastructure and application code are on separate levers: Terraform for the
+former, two scripts for the latter.
+
+**This creates billable resources.** RDS `db.t4g.micro`, ElastiCache
+`cache.t4g.micro`, an ALB and a CloudFront distribution run roughly $40–60 a
+month if left up. `terraform destroy` removes them, and this stack is torn down
+between reviews to control cost.
+
+### Prerequisites
+
+```bash
+aws sts get-caller-identity && terraform version && docker version
+```
+
+Credentials need permission to create VPC, ECS, ECR, RDS, ElastiCache, ALB, S3,
+CloudFront, Secrets Manager, IAM and CloudWatch Logs resources. Terraform must
+be >= 1.5.
+
+### From a clean account
+
+```bash
+cd infra && terraform init && terraform apply
+```
+
+Roughly 12–15 minutes; RDS and CloudFront dominate. The ECS service reports
+tasks failing to pull an image until the first backend deploy, which is
+expected.
+
+```bash
+./scripts/deploy-backend.sh    # build, push, migrate, roll
+./scripts/deploy-frontend.sh   # build, sync to S3, invalidate CloudFront
+```
+
+`deploy-backend.sh` tags images with the git SHA rather than `:latest` and
+refuses to build from a dirty tree, so a running task is always traceable to a
+commit and the previous image survives for rollback. Migrations run on every
+deploy as a one-off ECS task, and the service rolls only if that task exits 0 —
+new code cannot end up running against an old schema.
+
+### What Terraform stops managing after the first apply
+
+The two levers are deliberate, but the boundary has a sharp edge worth knowing
+before you edit `infra/modules/ecs/main.tf`.
+
+The task definition carries `lifecycle { ignore_changes = [container_definitions] }`
+so Terraform does not fight `deploy-backend.sh` over the image tag. Terraform
+cannot ignore one nested field of a JSON blob, so this ignores the **whole**
+container definition. After the first apply, changing any of these in Terraform
+has no effect at all, silently:
+
+- `stopTimeout`
+- the `PORT` and `IDEMPOTENCY_TTL_SECONDS` environment variables
+- the `secrets` ARNs
+- the log configuration
+
+To change one, either edit it and force a new revision through
+`deploy-backend.sh`, or temporarily remove the `ignore_changes` block, apply,
+and put it back.
+
+Separately, the service carries `ignore_changes = [task_definition]`. `cpu` and
+`memory` sit outside `container_definitions`, so editing those *does* produce a
+new task definition revision — but the service will not adopt it until the next
+`deploy-backend.sh` run.
+
+### Redeploying the same commit
+
+ECR is set to `IMMUTABLE` tags, which is what makes a git SHA identify exactly
+one image. The cost is that `deploy-backend.sh` cannot push a SHA twice: if a
+deploy fails after the push (a failing migration, say), fixing the cause and
+re-running the script aborts on the push. Make an empty commit
+(`git commit --allow-empty`) and deploy that.
+
+### Teardown
+
+```bash
+cd infra && terraform destroy
+```
+
+## License
+
+[MIT](LICENSE)
