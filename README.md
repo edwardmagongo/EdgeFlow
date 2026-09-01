@@ -12,7 +12,9 @@ saturating load generator that located the gateway's throughput knee
 stores them in PostgreSQL, with Redis holding batch-level idempotency keys
 (Phase 6). The HTTP sink still talks to any endpoint you point it at. Phase 7
 added a read/query API (`GET /v1/events`) and Phase 8 added a dashboard on top
-of it; there is still no cloud deployment. Each phase has its own
+of it. Phase 11 adds reviewable Terraform and a deploy runbook for AWS
+(see "Deployment (AWS)" below); it has not yet been applied to an
+account, so there is still no running cloud deployment. Each phase has its own
 spec under `docs/superpowers/specs/` and a plan under
 `docs/superpowers/plans/`; Phases 2-6 also have a task-by-task execution log
 under `docs/superpowers/progress/`.
@@ -183,6 +185,76 @@ The health strip polls `GET /v1/health` every 5 seconds. The explorer
 queries `GET /v1/events` and paginates with the opaque cursor it
 returns -- "Next"/"Previous" walk forward and backward through pages
 already fetched in the current session, not through page numbers.
+
+## Deployment (AWS)
+
+Terraform under `infra/` provisions one environment (`prod`) in `eu-west-1`.
+One CloudFront distribution fronts both halves of the product: the default
+behavior serves the dashboard's static build from a private S3 bucket, and
+`/v1/*` routes to an internet-facing ALB in front of a single ECS Fargate task
+running the backend. RDS Postgres and ElastiCache Redis sit in private subnets
+reachable only from the ECS security group. HTTPS comes from the
+distribution's own `*.cloudfront.net` certificate -- there is no custom domain
+and no ACM certificate.
+
+Infrastructure and application code are on separate levers: Terraform for the
+former, two scripts for the latter.
+
+**This creates billable resources.** RDS `db.t4g.micro`, ElastiCache
+`cache.t4g.micro`, an ALB and a CloudFront distribution run roughly $40-60 a
+month if left up. `terraform destroy` removes them.
+
+### Prerequisites
+
+```bash
+aws sts get-caller-identity && terraform version && docker version
+```
+
+Credentials need permission to create VPC, ECS, ECR, RDS, ElastiCache, ALB,
+S3, CloudFront, Secrets Manager, IAM and CloudWatch Logs resources. Terraform
+must be >= 1.5.
+
+### From a clean account
+
+```bash
+cd infra && terraform init && terraform apply
+```
+
+Roughly 12-15 minutes; RDS and CloudFront dominate. The ECS service reports
+tasks failing to pull an image until the first backend deploy, which is
+expected.
+
+```bash
+./scripts/deploy-backend.sh    # build, push, migrate, roll
+./scripts/deploy-frontend.sh   # build, sync to S3, invalidate CloudFront
+```
+
+`deploy-backend.sh` tags images with the git SHA rather than `:latest` and
+refuses to build from a dirty tree, so a running task is always traceable to a
+commit and the previous image survives for rollback. Migrations run on every
+deploy as a one-off ECS task, and the service rolls only if that task exits 0
+-- new code cannot end up running against an old schema.
+
+### Health endpoints
+
+Two, deliberately:
+
+- `GET /v1/health` reports dependency reachability and the ingest counters.
+  It answers 200 even when Postgres or Redis is down, so it is a diagnostic,
+  not a health check.
+- `GET /v1/health/live` reports only that the process is up. This is what the
+  ALB target group checks.
+
+The split is not cosmetic. With one ECS task and one shared RDS instance,
+failing the load balancer check on a database outage would deregister the only
+target and turn the backend's own retryable 503s into CloudFront 502s, without
+routing around anything -- there is nothing to route to.
+
+### Teardown
+
+```bash
+cd infra && terraform destroy
+```
 
 ## Benchmarks
 
