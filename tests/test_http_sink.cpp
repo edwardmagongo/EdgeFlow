@@ -687,6 +687,22 @@ TEST(HttpSink, StopAccountsForEveryBatchAcrossAllThreads) {
               kBatches);
 }
 
+TEST(HttpSink, ReusesOneConnectionPerThread) {
+    StubHttpServer server;
+    edgeflow::Stats stats;
+    constexpr std::size_t kBatches = 8;
+    {
+        auto options = options_for(server.port());
+        options.concurrency = 1;  // one thread => one connection for all 8 batches
+        HttpSink sink(std::move(options), stats);
+        for (std::size_t i = 0; i < kBatches; ++i) sink.consume(sample_batch());
+        ASSERT_TRUE(wait_for_requests(server, kBatches));
+    }
+    EXPECT_EQ(server.request_count(), kBatches);
+    EXPECT_EQ(server.connection_count(), 1u)
+        << "each batch opened its own connection -- keep-alive is not in effect";
+}
+
 TEST(HttpSink, ConcurrencyOneMatchesTheSingleThreadedContract) {
     StubHttpServer server;
     edgeflow::Stats stats;
