@@ -29,6 +29,14 @@ namespace {
 struct PersistentConnection {
     boost::asio::io_context io_context;
     std::optional<beast::tcp_stream> stream;
+    // Lives with the connection, not the call: Beast's async_read may pull
+    // bytes off the socket beyond the current response into this buffer. On a
+    // fresh-per-call buffer those trailing bytes would be silently discarded
+    // when the buffer is destroyed, desyncing the next read on the same
+    // (reused) socket from the stream. Clearing it in drop() is still
+    // required -- a fresh connection must not carry over bytes from a
+    // previous, unrelated socket.
+    beast::flat_buffer buffer;
 
     bool live() const { return stream.has_value(); }
 
@@ -44,6 +52,7 @@ struct PersistentConnection {
             stream.reset();
         }
         io_context.restart();
+        buffer.clear();
     }
 };
 
@@ -207,7 +216,6 @@ HttpSink::SendOutcome HttpSink::send_once(const OutboundBatch& batch) {
     request.body() = batch.body;
     request.prepare_payload();
 
-    beast::flat_buffer buffer;
     http::response<http::string_body> response;
     beast::error_code failure;
 
@@ -226,7 +234,7 @@ HttpSink::SendOutcome HttpSink::send_once(const OutboundBatch& batch) {
             failure = write_error;
             return;
         }
-        http::async_read(stream, buffer, response,
+        http::async_read(stream, connection.buffer, response,
                          [&](beast::error_code read_error, std::size_t) {
                              if (read_error) {
                                  failure = read_error;
