@@ -37,11 +37,14 @@ resource "aws_db_instance" "this" {
   # destroy would leave a billable artifact terraform destroy does not remove,
   # which the spec's acceptance criterion 6 forbids.
   skip_final_snapshot = true
-  # Backup storage up to the size of the instance is free, so retention here is
-  # not the cost trade the instance sizing is. At 0 the loss of this instance
-  # loses the data outright, with no point-in-time recovery to fall back on.
+  # At 0 the loss of this instance loses the data outright, with no
+  # point-in-time recovery. 7 days was rejected by this account:
+  # FreeTierRestrictionError, "the specified backup retention period exceeds
+  # the maximum available to free tier customers". 1 is the most a free-tier
+  # account will take, and still buys a day of point-in-time recovery.
+  # Raise it on an account without that restriction.
   # skip_final_snapshot stays true so terraform destroy remains a clean teardown.
-  backup_retention_period = 7
+  backup_retention_period = 1
 
   apply_immediately = true
 
