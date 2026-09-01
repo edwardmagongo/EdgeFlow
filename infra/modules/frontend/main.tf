@@ -54,6 +54,34 @@ locals {
   all_viewer_except_host_policy_id = "b689b0a8-53d0-40ab-baf2-68738e2966ac"
 }
 
+# Serves index.html for client-side routes so the SPA can render them, while
+# leaving real asset requests alone -- a missing /assets/*.js must still 404
+# rather than return HTML with status 200.
+#
+# Attached to the S3 behavior only. This replaces the custom_error_response
+# approach, which CloudFront applies across the whole distribution and which
+# therefore also rewrote the API's 403s and 404s into 200s.
+resource "aws_cloudfront_function" "spa_router" {
+  name    = "${var.name_prefix}-spa-router"
+  runtime = "cloudfront-js-2.0"
+  comment = "SPA deep-link fallback for the dashboard origin"
+  publish = true
+
+  code = <<-EOT
+    function handler(event) {
+      var request = event.request;
+      var uri = request.uri;
+      // Anything whose last path segment carries an extension is a real file.
+      // Everything else is a client-side route.
+      var lastSegment = uri.substring(uri.lastIndexOf('/') + 1);
+      if (lastSegment.indexOf('.') === -1) {
+        request.uri = '/index.html';
+      }
+      return request;
+    }
+  EOT
+}
+
 resource "aws_cloudfront_distribution" "this" {
   enabled             = true
   default_root_object = "index.html"
@@ -87,6 +115,21 @@ resource "aws_cloudfront_distribution" "this" {
     allowed_methods        = ["GET", "HEAD", "OPTIONS"]
     cached_methods         = ["GET", "HEAD"]
     cache_policy_id        = local.caching_optimized_policy_id
+
+    # Text assets are worth compressing and this costs nothing; the dashboard
+    # bundle is JS and CSS.
+    compress = true
+
+    # SPA deep links are resolved here rather than by a custom_error_response,
+    # because those are configured per DISTRIBUTION, not per behavior: a 403 or
+    # 404 from the ALB behind /v1/* would have been rewritten to index.html
+    # with status 200 as well. The sink branches on status code, so a 404
+    # arriving as 200 would read as "batch stored" and drop the batch silently.
+    # A function attaches to one behavior, so the fallback cannot reach the API.
+    function_association {
+      event_type   = "viewer-request"
+      function_arn = aws_cloudfront_function.spa_router.arn
+    }
   }
 
   ordered_cache_behavior {
@@ -101,20 +144,6 @@ resource "aws_cloudfront_distribution" "this" {
     # parameter.
     cache_policy_id          = local.caching_disabled_policy_id
     origin_request_policy_id = local.all_viewer_except_host_policy_id
-  }
-
-  # The dashboard is a single-page app: a deep link is not an S3 key, and S3
-  # answers 403 rather than 404 for a missing object behind OAC.
-  custom_error_response {
-    error_code         = 403
-    response_code      = 200
-    response_page_path = "/index.html"
-  }
-
-  custom_error_response {
-    error_code         = 404
-    response_code      = 200
-    response_page_path = "/index.html"
   }
 
   restrictions {

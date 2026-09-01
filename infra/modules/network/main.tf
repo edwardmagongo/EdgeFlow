@@ -56,17 +56,30 @@ resource "aws_route_table_association" "public" {
   route_table_id = aws_route_table.public.id
 }
 
+data "aws_ec2_managed_prefix_list" "cloudfront" {
+  name = "com.amazonaws.global.cloudfront.origin-facing"
+}
+
 resource "aws_security_group" "alb" {
   name        = "${var.name_prefix}-alb"
   description = "Internet-facing ALB"
   vpc_id      = aws_vpc.this.id
 
   ingress {
-    description = "HTTP from anywhere; CloudFront is the intended caller"
-    from_port   = 80
-    to_port     = 80
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
+    # CloudFront's own egress ranges, not 0.0.0.0/0. The listener is plain HTTP
+    # with no certificate, so an ALB open to the internet lets anyone who finds
+    # its DNS name reach the API unencrypted and bypass the distribution
+    # entirely. "CloudFront is the intended caller" is an intent; this enforces
+    # it.
+    #
+    # The managed list counts its max-entries (currently 55) against the
+    # security group's 60-rule quota, so this group has room for this rule and
+    # little else. Raise the quota before adding more.
+    description     = "HTTP from CloudFront edge locations only"
+    from_port       = 80
+    to_port         = 80
+    protocol        = "tcp"
+    prefix_list_ids = [data.aws_ec2_managed_prefix_list.cloudfront.id]
   }
 
   egress {

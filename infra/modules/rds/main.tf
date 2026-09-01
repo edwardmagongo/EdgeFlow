@@ -36,8 +36,12 @@ resource "aws_db_instance" "this" {
   # One environment, no restore story in this phase. A final snapshot on
   # destroy would leave a billable artifact terraform destroy does not remove,
   # which the spec's acceptance criterion 6 forbids.
-  skip_final_snapshot     = true
-  backup_retention_period = 0
+  skip_final_snapshot = true
+  # Backup storage up to the size of the instance is free, so retention here is
+  # not the cost trade the instance sizing is. At 0 the loss of this instance
+  # loses the data outright, with no point-in-time recovery to fall back on.
+  # skip_final_snapshot stays true so terraform destroy remains a clean teardown.
+  backup_retention_period = 7
 
   apply_immediately = true
 
