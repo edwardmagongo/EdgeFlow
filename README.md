@@ -277,10 +277,17 @@ re-running the script aborts on the push. Make an empty commit
 Two, deliberately:
 
 - `GET /v1/health` reports dependency reachability and the ingest counters.
-  It answers 200 even when Postgres or Redis is down, so it is a diagnostic,
-  not a health check.
+  Its `status` is `"ok"` when both Postgres and Redis are reachable and
+  `"degraded"` when either is not. It answers **200 either way**, so it is a
+  diagnostic to read, not a check to route on.
 - `GET /v1/health/live` reports only that the process is up. This is what the
   ALB target group checks.
+
+A dependency outage bounds rather than blocks `/v1/health`: the pg pool carries
+a 3s `connectionTimeoutMillis`, so an unreachable database reports
+`"database": false` in about three seconds instead of hanging. Without that
+bound a revoked security group rule drops packets, and the query waits forever
+rather than failing -- which is what an earlier acceptance run actually hit.
 
 The split is not cosmetic. With one ECS task and one shared RDS instance,
 failing the load balancer check on a database outage would deregister the only

@@ -87,6 +87,13 @@ resource "aws_cloudfront_distribution" "this" {
   default_root_object = "index.html"
   comment             = "${var.name_prefix} dashboard and API"
 
+  # North America and Europe. The provider default is PriceClass_All, which pays
+  # for edge locations on every continent; this deployment is a single eu-west-1
+  # environment, so the extra reach is spend without a corresponding audience.
+  # Raise it if the dashboard is ever served to users outside those regions --
+  # the only effect is which edges serve the content, not whether it works.
+  price_class = "PriceClass_100"
+
   origin {
     origin_id                = "s3"
     domain_name              = aws_s3_bucket.site.bucket_regional_domain_name

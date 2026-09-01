@@ -22,9 +22,19 @@ export class HealthController {
       database = false;
     }
 
+    const redis = await this.idempotency.isReachable();
+
     return {
-      status: 'ok',
-      dependencies: { database, redis: await this.idempotency.isReachable() },
+      // Derived, not hardcoded. This previously read 'ok' with a dead database,
+      // which is what made it useless as a health check and why the ALB checks
+      // /v1/health/live instead. The dashboard never trusted it either --
+      // HealthStrip derives its own state from `dependencies` -- so the field
+      // was misleading rather than merely redundant.
+      //
+      // This stays a 200 either way: the endpoint is a diagnostic, and the
+      // liveness check is what anything routing traffic should act on.
+      status: database && redis ? 'ok' : 'degraded',
+      dependencies: { database, redis },
       counters: this.metrics.snapshot(),
     };
   }
