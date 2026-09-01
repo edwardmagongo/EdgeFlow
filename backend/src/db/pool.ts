@@ -9,7 +9,23 @@ const logger = new Logger('PgPool');
 export const pgPoolProvider: Provider = {
   provide: PG_POOL,
   useFactory: (): Pool => {
-    const pool = new Pool({ connectionString: loadConfig().databaseUrl });
+    const pool = new Pool({
+      connectionString: loadConfig().databaseUrl,
+
+      // Without this, an unreachable Postgres makes a query wait forever
+      // rather than fail. That is not hypothetical: revoking the RDS security
+      // group's ingress rule during Task 8's acceptance run left
+      // GET /v1/health hanging instead of reporting "database": false, because
+      // a dropped packet -- unlike a refused connection -- produces no error
+      // for the endpoint's try/catch to catch.
+      //
+      // 3s, chosen to sit under the gateway sink's own 5s per-attempt timeout.
+      // The backend then answers with its own retryable 503 before the sink
+      // gives up client-side, which is a cleaner signal for the retry path.
+      // Note this bound also covers waiting for a free client when the pool is
+      // at capacity, so it should stay well clear of a healthy connect time.
+      connectionTimeoutMillis: 3_000,
+    });
 
     // pg emits 'error' on the Pool itself when an already-idle pooled client
     // is terminated out-of-band (e.g. Postgres shutting down or killing the
