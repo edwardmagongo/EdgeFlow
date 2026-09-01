@@ -235,6 +235,39 @@ commit and the previous image survives for rollback. Migrations run on every
 deploy as a one-off ECS task, and the service rolls only if that task exits 0
 -- new code cannot end up running against an old schema.
 
+### What Terraform stops managing after the first apply
+
+The two levers are deliberate, but the boundary has a sharp edge worth knowing
+before you edit `infra/modules/ecs/main.tf`.
+
+The task definition carries `lifecycle { ignore_changes = [container_definitions] }`
+so Terraform does not fight `deploy-backend.sh` over the image tag. Terraform
+cannot ignore one nested field of a JSON blob, so this ignores the **whole**
+container definition. After the first apply, changing any of these in Terraform
+has no effect at all, silently:
+
+- `stopTimeout`
+- the `PORT` and `IDEMPOTENCY_TTL_SECONDS` environment variables
+- the `secrets` ARNs
+- the log configuration
+
+To change one, either edit it and force a new revision through
+`deploy-backend.sh`, or temporarily remove the `ignore_changes` block, apply, and
+put it back.
+
+Separately, the service carries `ignore_changes = [task_definition]`. `cpu` and
+`memory` sit outside `container_definitions`, so editing those *does* produce a
+new task definition revision -- but the service will not adopt it until the next
+`deploy-backend.sh` run.
+
+### Redeploying the same commit
+
+ECR is set to `IMMUTABLE` tags, which is what makes a git SHA identify exactly
+one image. The cost is that `deploy-backend.sh` cannot push a SHA twice: if a
+deploy fails after the push (a failing migration, say), fixing the cause and
+re-running the script aborts on the push. Make an empty commit
+(`git commit --allow-empty`) and deploy that.
+
 ### Health endpoints
 
 Two, deliberately:
