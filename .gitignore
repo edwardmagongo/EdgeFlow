@@ -3,6 +3,10 @@ build*/
 __pycache__/
 .superpowers/
 
+# macOS Finder metadata. Created in any directory the Finder opens, so it
+# turns up in worktrees and subdirectories rather than only at the root.
+.DS_Store
+
 # Terraform. .terraform/ is ~670MB of provider binaries. State files are
 # excluded because terraform.tfstate holds the random_password-generated RDS
 # password in plaintext; .terraform.lock.hcl is deliberately NOT ignored, since
