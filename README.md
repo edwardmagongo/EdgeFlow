@@ -13,9 +13,13 @@ stores them in PostgreSQL, with Redis holding batch-level idempotency keys
 (Phase 6). The HTTP sink still talks to any endpoint you point it at. Phase 7
 added a read/query API (`GET /v1/events`) and Phase 8 added a dashboard on top
 of it. Phase 11 adds reviewable Terraform and a deploy runbook for AWS
-(see "Deployment (AWS)" below); it has not yet been applied to an
-account, so there is still no running cloud deployment. Each phase has its own
-spec under `docs/superpowers/specs/` and a plan under
+(see "Deployment (AWS)" below). It has been applied to a real account and
+verified end-to-end: the dashboard and the API served through one CloudFront
+distribution, backed by RDS Postgres and ElastiCache Redis. Whether an
+environment is running at any given moment depends on whether `terraform
+destroy` has been run since; the evidence is in
+`docs/superpowers/progress/2026-09-01-docker-aws-deployment-progress.md`.
+Each phase has its own spec under `docs/superpowers/specs/` and a plan under
 `docs/superpowers/plans/`; Phases 2-6 also have a task-by-task execution log
 under `docs/superpowers/progress/`.
 
