@@ -50,6 +50,9 @@ Config parse_args(int argc, char** argv) {
         } else if (arg.starts_with("--sink-outbound-capacity=")) {
             config.sink_outbound_capacity = edgeflow::parse_positive_size(
                 edgeflow::arg_value(arg), "--sink-outbound-capacity");
+        } else if (arg.starts_with("--sink-concurrency=")) {
+            config.sink_concurrency =
+                edgeflow::parse_positive_size(edgeflow::arg_value(arg), "--sink-concurrency");
         } else if (arg.starts_with("--sink-backpressure=")) {
             config.sink_backpressure = parse_policy(edgeflow::arg_value(arg));
         } else if (arg.starts_with("--sink-max-retries=")) {
@@ -77,6 +80,9 @@ Config parse_args(int argc, char** argv) {
     }
     if (config.sink_outbound_capacity == 0) {
         throw std::invalid_argument("--sink-outbound-capacity must be at least 1");
+    }
+    if (config.sink_concurrency == 0) {
+        throw std::invalid_argument("--sink-concurrency must be at least 1");
     }
     return config;
 }

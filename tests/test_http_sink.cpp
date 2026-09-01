@@ -119,6 +119,7 @@ TEST(StubHttpServer, HandlesOverlappingConnectionsConcurrently) {
 #include "edgeflow/file_sink.hpp"
 #include "edgeflow/gateway/http_sink.hpp"
 #include "edgeflow/stats.hpp"
+#include <algorithm>
 #include <cstdio>
 #include <fstream>
 #include <sstream>
@@ -614,4 +615,91 @@ TEST(HttpSink, GivesDifferentBatchesDifferentKeys) {
     ASSERT_EQ(keys.size(), 2u);
     EXPECT_NE(keys[0], keys[1])
         << "two distinct batches shared a key; the backend would discard the second";
+}
+
+TEST(HttpSink, DrainsTheOutboundQueueConcurrently) {
+    StubHttpServer server;
+    // Every reply waits 200ms, so the wall time is dominated by how many
+    // requests are in flight at once rather than by any local work.
+    server.script({StubResponse{StubAction::Ok, std::chrono::milliseconds(200)}});
+    edgeflow::Stats stats;
+
+    constexpr std::size_t kBatches = 4;
+    const auto started = std::chrono::steady_clock::now();
+    {
+        auto options = options_for(server.port());
+        options.concurrency = kBatches;
+        HttpSink sink(std::move(options), stats);
+        for (std::size_t i = 0; i < kBatches; ++i) {
+            sink.consume(sample_batch());
+        }
+    } // destructor stops and drains
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - started);
+
+    EXPECT_EQ(server.request_count(), kBatches);
+    EXPECT_EQ(stats.snapshot().batches_sent, kBatches);
+    // Serialized: ~800ms. Concurrent: ~200ms. The midpoint is a wide margin
+    // that a single-threaded sink cannot reach.
+    EXPECT_LT(elapsed, std::chrono::milliseconds(200 * kBatches / 2));
+}
+
+TEST(HttpSink, ConcurrentBatchesEachCarryTheirOwnKey) {
+    StubHttpServer server;
+    edgeflow::Stats stats;
+    constexpr std::size_t kBatches = 16;
+    {
+        auto options = options_for(server.port());
+        options.concurrency = 4;
+        HttpSink sink(std::move(options), stats);
+        for (std::size_t i = 0; i < kBatches; ++i) {
+            sink.consume(sample_batch());
+        }
+    }
+    auto keys = server.idempotency_keys();
+    ASSERT_EQ(keys.size(), kBatches);
+    // Compare as a SET, not a sequence: under concurrency the arrival order of
+    // distinct batches is deliberately not guaranteed, so asserting order here
+    // would be asserting something the design explicitly does not promise.
+    std::sort(keys.begin(), keys.end());
+    EXPECT_EQ(std::unique(keys.begin(), keys.end()), keys.end())
+        << "two concurrently-sent batches shared an idempotency key";
+    EXPECT_EQ(stats.snapshot().batches_sent, kBatches);
+}
+
+TEST(HttpSink, StopAccountsForEveryBatchAcrossAllThreads) {
+    StubHttpServer server;
+    edgeflow::Stats stats;
+    constexpr std::size_t kBatches = 32;
+    {
+        auto options = options_for(server.port());
+        options.concurrency = 4;
+        HttpSink sink(std::move(options), stats);
+        for (std::size_t i = 0; i < kBatches; ++i) {
+            sink.consume(sample_batch());
+        }
+    } // destructor drains within kDrainDeadline
+    const auto snapshot = stats.snapshot();
+    // Every batch is accounted for exactly once: delivered, dropped on the way
+    // into the queue, or abandoned at the drain deadline. Nothing vanishes.
+    EXPECT_EQ(snapshot.batches_sent + snapshot.batches_dropped_outbound +
+                  snapshot.batches_dropped_exhausted,
+              kBatches);
+}
+
+TEST(HttpSink, ConcurrencyOneMatchesTheSingleThreadedContract) {
+    StubHttpServer server;
+    edgeflow::Stats stats;
+    {
+        auto options = options_for(server.port());
+        options.concurrency = 1;
+        HttpSink sink(std::move(options), stats);
+        sink.consume(sample_batch());
+        sink.consume(sample_batch());
+        ASSERT_TRUE(wait_for_requests(server, 2));
+    }
+    // One thread means one request in flight, so arrival order IS creation
+    // order here -- the property concurrency deliberately gives up.
+    EXPECT_EQ(server.request_count(), 2u);
+    EXPECT_EQ(stats.snapshot().batches_sent, 2u);
 }

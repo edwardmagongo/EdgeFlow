@@ -21,7 +21,13 @@ HttpSink::HttpSink(Options options, edgeflow::Stats& stats)
       target_(parse_url(options_.url)),
       stats_(stats),
       outbound_(options_.outbound_capacity, options_.backpressure) {
-    thread_ = std::thread([this] { run(); });
+    // Every thread runs the identical run() loop and pops from the same queue.
+    // BoundedQueue is a mutex-guarded deque, so multiple consumers are already
+    // safe; Stats is entirely std::atomic. Neither needed a change.
+    threads_.reserve(options_.concurrency);
+    for (std::size_t i = 0; i < options_.concurrency; ++i) {
+        threads_.emplace_back([this] { run(); });
+    }
 }
 
 HttpSink::~HttpSink() { stop(); }
@@ -211,8 +217,15 @@ bool HttpSink::send_with_retries(const OutboundBatch& batch) {
         // average -- or a backend that is failing under load gets hit sooner
         // than intended. The spread still de-synchronises several gateways
         // retrying against one recovering backend.
+        // Jitter source. This was a member documented as sink-thread-only,
+        // which stopped being true the moment the sink drained from N threads:
+        // concurrent mutation of one mt19937 is a data race, and TSan reports
+        // it. thread_local gives each sink thread its own generator with no
+        // synchronisation and no contention, and jitter needs no coordination
+        // between threads to do its job.
+        static thread_local std::mt19937 jitter_rng(std::random_device{}());
         std::uniform_int_distribution<long long> distribution(0, backoff.count() / 2);
-        const auto delay = backoff + std::chrono::milliseconds(distribution(jitter_rng_));
+        const auto delay = backoff + std::chrono::milliseconds(distribution(jitter_rng));
         std::this_thread::sleep_for(delay);
 
         stats_.record_batch_retried();
@@ -232,8 +245,18 @@ void HttpSink::stop() {
     // sink thread finishes the backlog rather than abandoning it -- bounded by
     // the deadline checked in run().
     outbound_.shutdown();
-    if (thread_.joinable()) {
-        thread_.join();
+    // Join ALL sink threads. shutdown() makes pop() return nullopt once the
+    // queue is drained, so every thread finishes the backlog rather than
+    // abandoning it -- bounded by the deadline checked in run().
+    //
+    // drain_deadline_ is written BEFORE draining_ is stored with release, and
+    // run() reads it only after an acquire load of draining_. That ordering is
+    // what makes one deadline safe to share across N threads; do not reorder
+    // these two lines.
+    for (auto& thread : threads_) {
+        if (thread.joinable()) {
+            thread.join();
+        }
     }
 }
 
