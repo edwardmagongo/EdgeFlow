@@ -313,19 +313,29 @@ describe('reconnect', () => {
     return null;
   }
 
-  afterEach(() => {
-    // Never leave the shared container down for the rest of the suite, even if
-    // an assertion above threw mid-outage.
-    compose('start redis');
-  });
-
-  it('degrades to unavailable during a real outage and recovers after it, without a process restart', async () => {
-    const metrics = new MetricsService();
-    const service = new IdempotencyService(metrics, {
+  // Every service a test creates, so afterEach can close it even when an
+  // assertion threw before the test's own onModuleDestroy(). A client left open
+  // keeps reconnecting forever and jest never exits.
+  const created: IdempotencyService[] = [];
+  function newService(): IdempotencyService {
+    const service = new IdempotencyService(new MetricsService(), {
       redisUrl: REDIS_URL,
       idempotencyTtlSeconds: 900,
       inFlightLeaseSeconds: 15,
     });
+    created.push(service);
+    return service;
+  }
+
+  afterEach(async () => {
+    // Never leave the shared container down for the rest of the suite, even if
+    // an assertion above threw mid-outage.
+    compose('start redis');
+    await Promise.all(created.splice(0).map((service) => service.onModuleDestroy()));
+  });
+
+  it('degrades to unavailable during a real outage and recovers after it, without a process restart', async () => {
+    const service = newService();
     await service.connect();
 
     expect((await service.claim(key('reconnect-before'))).state).toBe('claimed');
@@ -364,8 +374,6 @@ describe('reconnect', () => {
     // The real assertion: claim() works again on the SAME service instance.
     // With reconnectStrategy:false this stays 'unavailable' forever.
     expect((await service.claim(key('reconnect-after'))).state).toBe('claimed');
-
-    await service.onModuleDestroy();
   });
 
   it('recovers when Redis is unreachable at the moment it first connects', async () => {
@@ -377,12 +385,7 @@ describe('reconnect', () => {
     // AND the client must still be retrying when Redis appears.
     compose('stop redis');
 
-    const metrics = new MetricsService();
-    const service = new IdempotencyService(metrics, {
-      redisUrl: REDIS_URL,
-      idempotencyTtlSeconds: 900,
-      inFlightLeaseSeconds: 15,
-    });
+    const service = newService();
 
     const connectStartedAt = Date.now();
     await service.connect(); // must not throw, and must not hang for the outage
@@ -399,7 +402,5 @@ describe('reconnect', () => {
     const recoveredAfterMs = await pollUntilReachable(service, 15_000);
     expect(recoveredAfterMs).not.toBeNull();
     expect((await service.claim(key('boot-after'))).state).toBe('claimed');
-
-    await service.onModuleDestroy();
   });
 });
