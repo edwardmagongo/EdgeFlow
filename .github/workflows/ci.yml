@@ -8,11 +8,12 @@ on:
 jobs:
   build-and-test:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     strategy:
       matrix:
         sanitizer: [address, thread]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install Boost and OpenSSL
         run: sudo apt-get update && sudo apt-get install -y libboost-system-dev libssl-dev
@@ -33,36 +34,21 @@ jobs:
 
   backend:
     runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: postgres:16
-        env:
-          POSTGRES_USER: edgeflow
-          POSTGRES_PASSWORD: edgeflow
-          POSTGRES_DB: edgeflow
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U edgeflow"
-          --health-interval 2s
-          --health-timeout 3s
-          --health-retries 20
-      redis:
-        image: redis:7
-        ports:
-          - 6379:6379
-        options: >-
-          --health-cmd "redis-cli ping"
-          --health-interval 2s
-          --health-timeout 3s
-          --health-retries 20
+    # A hung jest run otherwise holds the job for GitHub's 6-hour default.
+    timeout-minutes: 30
+    # Postgres and Redis come from docker-compose.yml rather than Actions
+    # services: the reconnect tests stop and start Redis with `docker compose`,
+    # which cannot touch a service container.
     env:
-      DATABASE_URL: postgres://edgeflow:edgeflow@localhost:5432/edgeflow
-      REDIS_URL: redis://localhost:6379
+      DATABASE_URL: postgres://edgeflow:edgeflow@localhost:5433/edgeflow
+      REDIS_URL: redis://localhost:6380
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - name: Start Postgres and Redis
+        run: docker compose up --detach --wait
+
+      - uses: actions/setup-node@v5
         with:
           node-version: '22'
           cache: npm
@@ -87,3 +73,30 @@ jobs:
       - name: Test
         working-directory: backend
         run: npm test
+
+  frontend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Test
+        run: npm test
+
+      - name: Build
+        run: npm run build
